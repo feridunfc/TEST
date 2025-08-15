@@ -1,26 +1,25 @@
-from __future__ import annotations
+
 from collections import defaultdict
 from threading import RLock
+from typing import Callable, Dict, List, Type
 
+# Simple, thread-safe synchronous event bus
 class EventBus:
-    _subscribers = defaultdict(list)
-    _lock = RLock()
+    def __init__(self) -> None:
+        self._subs: Dict[type, List[Callable]] = defaultdict(list)
+        self._lock = RLock()
 
-    @classmethod
-    def subscribe(cls, event_type, callback):
-        with cls._lock:
-            cls._subscribers[event_type].append(callback)
+    def subscribe(self, event_type: Type, callback: Callable) -> None:
+        with self._lock:
+            self._subs[event_type].append(callback)
 
-    @classmethod
-    def publish(cls, event):
-        with cls._lock:
-            callbacks = list(cls._subscribers[type(event)])
+    def publish(self, event) -> None:
+        # Synchronous dispatching
+        callbacks = []
+        with self._lock:
+            callbacks = list(self._subs.get(type(event), []))
         for cb in callbacks:
-            try:
-                cb(event)
-            except Exception as e:
-                # In production push to logger
-                print(f"EventBus callback error: {e}")
+            cb(event)
 
-# convenience singleton-like alias
-event_bus = EventBus
+# Global singleton
+event_bus = EventBus()

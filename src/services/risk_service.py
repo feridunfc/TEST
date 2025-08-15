@@ -1,17 +1,30 @@
-import logging
-from core.bus.event_bus import EventBus
-from core.events.strategy_events import StrategySignalGenerated, SignalDirection
 
-logger = logging.getLogger("RiskService")
+import logging
+from core.bus.event_bus import event_bus
+from core.events.strategy_events import StrategySignalGenerated, SignalDirection
+from core.events.risk_events import RiskAssessmentCompleted
+
+log = logging.getLogger("RiskService")
 
 class RiskService:
-    def __init__(self, max_leverage: float = 1.0):
-        self.max_leverage = float(max_leverage)
-        EventBus.subscribe(StrategySignalGenerated, self.on_signal)
+    """Pass-through risk with optional gross cap. Extend later with vol targeting / max DD constraints."""
+    def __init__(self, gross_cap: float = 1.0) -> None:
+        self.gross_cap = float(gross_cap)
+        event_bus.subscribe(StrategySignalGenerated, self.on_signal)
 
-    def on_signal(self, event: StrategySignalGenerated):
-        # placeholder: just log / simple checks
-        if abs(event.strength) > 1.0:
-            logger.warning("Capping strength to 1.0")
-        # would publish OrderEvent here in a full ED stack
-        logger.info(f"Risk accepted signal {event.direction.name} for {event.symbol}")
+    def on_signal(self, ev: StrategySignalGenerated) -> None:
+        # Convert discrete signal to target position within [-gross_cap, +gross_cap]
+        mapping = {
+            SignalDirection.SHORT: -self.gross_cap,
+            SignalDirection.LONG: +self.gross_cap,
+            SignalDirection.FLAT: 0.0,
+        }
+        pos = float(mapping.get(ev.signal, 0.0))
+        rationale = f"pass_through; gross_cap={self.gross_cap}"
+        event_bus.publish(RiskAssessmentCompleted(
+            source="RiskService",
+            symbol=ev.symbol,
+            dt=ev.dt,
+            desired_position=pos,
+            rationale=rationale
+        ))
