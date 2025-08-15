@@ -1,202 +1,129 @@
-# --- path bootstrap ---
-import os, sys
-ROOT = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.abspath(os.path.join(ROOT, "..", "src"))
-if SRC not in sys.path:
-    sys.path.insert(0, SRC)
-
-import time
-from datetime import date, timedelta
-
-import numpy as np
+import traceback
+from datetime import datetime, timedelta
 import pandas as pd
 import streamlit as st
+import plotly.express as px
 
-# orchestrator import: sembol/tarih parametreleri opsiyonel, yoksa fallback
-from pipeline.orchestrator import run_pipeline
-from core.strategies import list_strategies
-try:
-    from core.strategies.ai_models import list_models
-except Exception:
-    def list_models():
-        return ["random_forest"]  # garanti fallback
+from config.config import load_config, AppConfig
+from pipeline.orchestrator import run_pipeline, list_models
 
-# ---------- ortak yardımcılar ----------
+# ---------------- Sidebar controls ----------------
+def _sidebar_controls() -> AppConfig:
+    cfg = load_config()
+    st.sidebar.header("Config")
+    symbol = st.sidebar.text_input("Symbol", value=cfg.data.symbol)
+    interval = st.sidebar.selectbox("Interval", options=["1d","1h","30m","15m"], index=0)
+    end_default = datetime.utcnow().date()
+    start_default = end_default - timedelta(days=365*3)
+    start = st.sidebar.date_input("Start", value=start_default)
+    end = st.sidebar.date_input("End", value=end_default)
 
-def _run_with_fallback(strategy_name, params, symbol=None, start=None, end=None, wf_n_splits=None):
-    """orchestrator eski imza ise TypeError yakala ve minimum argümanlarla tekrar dene"""
-    kw = {"strategy_name": strategy_name, "params": params}
-    if symbol is not None: kw["symbol"] = symbol
-    if start is not None:  kw["start"]  = str(start)
-    if end is not None:    kw["end"]    = str(end)
-    if wf_n_splits is not None: kw["wf_n_splits"] = wf_n_splits
-    try:
-        return run_pipeline(**kw)
-    except TypeError:
-        return run_pipeline(strategy_name=strategy_name, params=params)
+    commission = st.sidebar.number_input("Commission (fraction)", value=float(cfg.fees.commission), step=float(0.0001), format="%.4f")
+    slippage_bps = st.sidebar.number_input("Slippage (bps)", value=float(cfg.fees.slippage_bps), step=float(1))
 
-def _plot_series(df, sig=None, title="Price"):
-    import altair as alt
-    base = alt.Chart(df.reset_index()).encode(x="Date:T")
-    price = base.mark_line().encode(y="close:Q", tooltip=["Date:T", "close:Q"]).properties(height=300)
-    chart = price
-    if sig is not None and "signal" in sig:
-        long_pts = base.transform_filter("datum.signal == 1").mark_point(size=50).encode(y="close:Q", color=alt.value("green"))
-        flat_pts = base.transform_filter("datum.signal == 0").mark_point(size=50).encode(y="close:Q", color=alt.value("gray"))
-        chart = (price + long_pts + flat_pts)
-    st.altair_chart(chart.properties(title=title), use_container_width=True)
+    vol_target = st.sidebar.number_input("Vol Target (ann.)", value=float(cfg.risk.vol_target), step=float(0.01))
+    max_dd = st.sidebar.number_input("Max Drawdown limit", value=float(cfg.risk.max_drawdown), step=float(0.01))
 
-def _show_metrics(stats: dict):
-    if not stats:
-        return
-    m = pd.DataFrame([stats]).T
-    m.columns = ["value"]
-    st.dataframe(m, use_container_width=True)
+    wf_splits = st.sidebar.number_input("Walkforward splits", value=int(cfg.backtest.walkforward_splits), step=1, min_value=2)
 
-# ---------- Beginner ----------
+    cfg.data.symbol = symbol
+    cfg.data.interval = interval
+    cfg.data.start = start.strftime("%Y-%m-%d")
+    cfg.data.end = end.strftime("%Y-%m-%d")
+    cfg.fees.commission = float(commission)
+    cfg.fees.slippage_bps = float(slippage_bps)
+    cfg.risk.vol_target = float(vol_target)
+    cfg.risk.max_drawdown = float(max_dd)
+    cfg.backtest.walkforward_splits = int(wf_splits)
+    return cfg
 
-def show_beginner_tab(state: dict):
-    st.subheader("Beginner (Guided)")
+# --------------- Tabs -----------------------------
+def show_main():
+    st.title("Autonom Trading v2.9 – Hybrid ED Backtester")
+    cfg = _sidebar_controls()
 
-    colL, colR = st.columns([1, 1])
-    with colL:
-        ticker = st.text_input("Ticker", value="SPY")
-        rng = st.date_input(
-            "Date range",
-            value=(date.today() - timedelta(days=365*2), date.today()),
-        )
-        if isinstance(rng, tuple) and len(rng) == 2:
-            start_dt, end_dt = rng
-        else:
-            start_dt, end_dt = date.today() - timedelta(days=365*2), date.today()
+    tabs = st.tabs(["Data", "Train", "Run", "Compare", "Report"])
 
-        preset = st.selectbox(
-            "Preset",
-            ["Trend Following (MA 20/50)", "AI (RandomForest)", "Hybrid (MA+AI)"],
-        )
+    with tabs[0]:
+        st.subheader("Load & Inspect Data")
+        st.write("Veri kaynağı: yfinance. Sembol ve tarihleri soldan güncelleyin.")
+        try:
+            # use run_pipeline with tiny simple strategy just to fetch/feature df quickly
+            df, info = run_pipeline("ma_crossover", params={"ma_fast": 20, "ma_slow": 50}, cfg=cfg, mode="simple")
+            st.write(df.tail())
+            fig = px.line(df.reset_index(), x=df.index.name or "index", y="close", title=f"{cfg.data.symbol} Close")
+            st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.error(f"Data load error: {e}")
+            st.code(traceback.format_exc())
 
-    with colR:
-        strategies = list_strategies()
-        st.caption(f"Available strategies: {', '.join(strategies)}")
+    with tabs[1]:
+        st.subheader("Train (AI Unified)")
         models = list_models()
-        st.caption(f"AI models: {', '.join(models)}")
+        selected_models = st.multiselect("AI Models", options=models, default=([m for m in models if m in ['random_forest','lightgbm','xgboost']][:2]))
+        train_ratio = st.slider("Train Ratio", min_value=0.5, max_value=0.9, value=0.7, step=0.05)
+        threshold = st.slider("Buy Threshold", min_value=0.4, max_value=0.6, value=0.5, step=0.01)
 
-    # preset paramları
-    if preset.startswith("Trend"):
-        strategy = "ma_crossover" if "ma_crossover" in strategies else strategies[0]
-        params = {"ma_fast": 20, "ma_slow": 50}
-    elif preset.startswith("AI"):
-        strategy = "ai_unified" if "ai_unified" in strategies else strategies[0]
-        params = {"model_type": models[0] if models else "random_forest", "train_ratio": 0.7, "threshold": 0.5}
-    else:
-        strategy = "hybrid_ensemble" if "hybrid_ensemble" in strategies else strategies[0]
-        params = {"ma_fast": 20, "ma_slow": 50, "model_type": models[0] if models else "random_forest", "train_ratio": 0.7, "threshold": 0.5}
+        if st.button("Run Walkforward AI"):
+            results = []
+            for m in selected_models:
+                try:
+                    params = {"model_type": m, "train_ratio": float(train_ratio), "threshold": float(threshold)}
+                    _, info = run_pipeline("ai_unified", params=params, cfg=cfg, mode="walkforward")
+                    stats = info["stats"]
+                    stats["model"] = m
+                    results.append(stats)
+                except Exception as e:
+                    st.error(f"{m} failed: {e}")
+                    st.code(traceback.format_exc())
+            if results:
+                dfres = pd.DataFrame(results).set_index("model")
+                st.dataframe(dfres.style.format("{:.4f}"))
+                st.bar_chart(dfres["sharpe"])
 
-    run_btn = st.button("Run Backtest")
-    if run_btn:
-        with st.spinner("Running..."):
-            df, info = _run_with_fallback(strategy, params, symbol=ticker, start=start_dt, end=end_dt)
-        state["last_df"] = df
-        state["last_info"] = info
+    with tabs[2]:
+        st.subheader("Run (Conventional)")
+        ma_fast = st.number_input("MA Fast", value=20, step=1)
+        ma_slow = st.number_input("MA Slow", value=50, step=1)
+        mode = st.selectbox("Mode", options=["simple", "walkforward"], index=0)
+        if st.button("Run Backtest"):
+            try:
+                df, info = run_pipeline("ma_crossover", params={"ma_fast": int(ma_fast), "ma_slow": int(ma_slow)}, cfg=cfg, mode=mode)
+                st.write(info["stats"])
+                eq = info["equity"]
+                fig = px.line(eq.reset_index(), x=eq.index.name or "index", y=eq.name or 0, title="Equity Curve")
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.error(f"Backtest error: {e}")
+                st.code(traceback.format_exc())
 
-        st.success("Done.")
-        _plot_series(df, info.get("signals_df") if info else None, title=f"{ticker} - Price & Signals")
-        if info and "equity_curve" in info:
-            ec = pd.Series(info["equity_curve"], index=df.index, name="equity").to_frame()
-            _plot_series(ec.rename(columns={"equity": "close"}), title="Equity Curve")
-        _show_metrics(info.get("stats", {}))
+    with tabs[3]:
+        st.subheader("Compare")
+        st.write("Aynı veri penceresinde birden fazla stratejiyi karşılaştır.")
+        compare_choices = st.multiselect("Strategies", options=["ma_crossover","ai_unified"], default=["ma_crossover","ai_unified"])
+        run_mode = st.selectbox("Mode", options=["simple","walkforward"], index=1)
+        if st.button("Run Compare"):
+            rows = []
+            for sname in compare_choices:
+                try:
+                    params = {"ma_fast":20,"ma_slow":50} if sname=="ma_crossover" else {"model_type":"random_forest","train_ratio":0.7,"threshold":0.5}
+                    _, info = run_pipeline(sname, params=params, cfg=cfg, mode=run_mode)
+                    r = dict(info["stats"])
+                    r["strategy"] = sname
+                    rows.append(r)
+                except Exception as e:
+                    st.error(f"{sname} failed: {e}")
+                    st.code(traceback.format_exc())
+            if rows:
+                dfcmp = pd.DataFrame(rows).set_index("strategy")
+                st.dataframe(dfcmp.style.format("{:.4f}"))
+                st.bar_chart(dfcmp["sharpe"])
 
-# ---------- Advanced (eski “run”) ----------
-
-def show_advanced_tab(state: dict):
-    st.subheader("Advanced")
-
-    strategies = list_strategies()
-    strategy = st.sidebar.selectbox("Strategy", strategies, index=0 if strategies else None)
-
-    params = {}
-    if strategy == "ma_crossover":
-        ma_fast = st.sidebar.slider("MA Fast", 5, 200, 20, step=1)
-        ma_slow = st.sidebar.slider("MA Slow", 10, 250, 50, step=1)
-        if ma_slow <= ma_fast:
-            st.sidebar.warning("MA Slow > MA Fast olmalı")
-        params = {"ma_fast": ma_fast, "ma_slow": ma_slow}
-
-    elif strategy == "ai_unified":
-        models = list_models()
-        model = st.sidebar.selectbox("AI Model", models, index=0 if models else None)
-        tr = st.sidebar.slider("Train ratio", 0.5, 0.95, 0.7, step=0.01)
-        th = st.sidebar.slider("Threshold", 0.1, 0.9, 0.5, step=0.05)
-        params = {"model_type": model, "train_ratio": float(tr), "threshold": float(th)}
-
-    elif strategy == "hybrid_ensemble":
-        ma_fast = st.sidebar.slider("MA Fast", 5, 200, 20, step=1)
-        ma_slow = st.sidebar.slider("MA Slow", 10, 250, 50, step=1)
-        models = list_models()
-        model = st.sidebar.selectbox("AI Model", models, index=0 if models else None)
-        tr = st.sidebar.slider("Train ratio", 0.5, 0.95, 0.7, step=0.01)
-        th = st.sidebar.slider("Threshold", 0.1, 0.9, 0.5, step=0.05)
-        params = {"ma_fast": ma_fast, "ma_slow": ma_slow, "model_type": model, "train_ratio": float(tr), "threshold": float(th)}
-
-    # veri aralığı ve walk-forward opsiyonları
-    with st.sidebar.expander("Data & Walk-forward"):
-        ticker = st.text_input("Ticker", value="SPY")
-        start_dt = st.date_input("Start", value=date.today() - timedelta(days=365*3))
-        end_dt = st.date_input("End", value=date.today())
-        wf = st.number_input("Walk-forward splits (0=off)", min_value=0, max_value=10, value=0, step=1)
-
-    run_btn = st.button("Run Backtest")
-    if run_btn:
-        with st.spinner("Running..."):
-            df, info = _run_with_fallback(strategy, params, symbol=ticker, start=start_dt, end=end_dt, wf_n_splits=(wf or None))
-        state["last_df"] = df
-        state["last_info"] = info
-
-        st.success("Done.")
-        _plot_series(df, info.get("signals_df") if info else None, title=f"{ticker} - Price & Signals")
-        if info and "equity_curve" in info:
-            ec = pd.Series(info["equity_curve"], index=df.index, name="equity").to_frame()
-            _plot_series(ec.rename(columns={"equity": "close"}), title="Equity Curve")
-        _show_metrics(info.get("stats", {}))
-
-# ---------- Live (stub) ----------
-
-def show_live_stub_tab(state: dict):
-    st.subheader("Live Trading (Stub)")
-    st.info("Bu ekran canlı akışın **mock** versiyonudur. Gerçek emir/bağlantı yok.")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        ticker = st.text_input("Ticker", value="SPY")
-        ticks = st.number_input("Simulate N ticks", min_value=10, max_value=500, value=60, step=10)
-    with col2:
-        mu = st.number_input("Drift (bp/tick)", value=0.0)
-        vol = st.number_input("Vol (bp/tick)", value=10.0)
-
-    holder = st.empty()
-    start_price = 500.0
-    if st.button("Start Simulation"):
-        prices = [start_price]
-        for i in range(int(ticks)):
-            rnd = np.random.randn() * vol + mu
-            prices.append(prices[-1] * (1 + rnd / 10000.0))
-            df = pd.DataFrame({"price": prices}, index=pd.RangeIndex(len(prices)))
-            holder.line_chart(df)
-            time.sleep(0.02)
-
-        st.success("Simulation finished.")
-        st.caption("Not: Bu ekran yalnızca arayüz/sinyal akışı denemeleri içindir.")
-
-# ---------- Reports ----------
-
-def show_report_tab(state: dict):
-    st.subheader("Reports")
-    info = state.get("last_info")
-    df = state.get("last_df")
-    if not info or df is None:
-        st.info("Önce Beginner/Advanced sekmesinde bir backtest çalıştırın.")
-        return
-    _show_metrics(info.get("stats", {}))
-    if "signals_df" in info:
-        st.write("Signals (tail):")
-        st.dataframe(info["signals_df"].tail(20), use_container_width=True)
+    with tabs[4]:
+        st.subheader("Report & Next Steps")
+        st.markdown("""
+        **Metrikler:** Sharpe, Sortino, Calmar, MaxDD, Annualized Return, Vol, WinRate
+        **Walk-Forward:** TimeSeriesSplit ile OOS test.
+        **Risk:** Vol Target ve MaxDD stop.
+        **Event-Driven:** EventBus çekirdeği ve Feature/Signal/Risk servisleri eklendi.
+        """)
