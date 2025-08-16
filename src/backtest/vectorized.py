@@ -1,13 +1,13 @@
-from __future__ import annotations
-import numpy as np, pandas as pd
 
-def backtest_vectorized(prices: pd.DataFrame, signals: pd.Series, commission: float=0.0005, slippage_bps: float=1.0) -> pd.DataFrame:
-    s = signals.reindex(prices.index).fillna(0.0)
-    slipped_open = prices["open"] * (1 + (slippage_bps/1e4))
-    rets = (prices["close"] / slipped_open - 1.0).fillna(0.0)
-    strat_rets = s.shift(1).fillna(0.0) * rets
-    trades = s.diff().abs().fillna(0.0)
-    costs = trades * commission
-    net = strat_rets - costs
-    equity = (1+net).cumprod()
-    return pd.DataFrame({"returns": net, "equity": equity})
+import numpy as np
+import pandas as pd
+
+def vectorized_pnl(df: pd.DataFrame, signals: pd.Series, commission=0.0005, slippage=0.0002):
+    signals = signals.reindex(df.index).fillna(0.0)
+    # execute at next open with slippage
+    exec_price = df['open'] * (1 + slippage*np.sign(signals.shift(1).fillna(0)))
+    ret = exec_price.pct_change().fillna(0.0) * signals.shift(1).fillna(0.0)
+    trades = signals.diff().abs().fillna(0.0)
+    ret -= trades * commission
+    equity = (1 + ret).cumprod()
+    return equity, ret

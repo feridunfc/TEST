@@ -1,41 +1,71 @@
-from __future__ import annotations
-import json
-from ..core.bus.event_bus import event_bus
-from ..core.events.backtest_events import BacktestRequested, BacktestCompleted
-from ..core.events.data_events import BarDataEvent, DataSnapshotReady
-from ..engines.data_provider_engine import DataProviderEngine
+
+import logging
+from core.bus.event_bus import event_bus
+from core.events.backtest_events import BacktestRequested, BacktestCompleted
+from core.events.data_events import BarDataEvent
+from services.feature_service import FeatureService
+from services.strategy_service import StrategyService
+from services.risk_service import RiskService
+from services.execution_service import ExecutionService
+from services.portfolio_service import PortfolioService
+from reporting.reporting_service import ReportingService
+from utils.windows import WalkForwardConfig, generate_walkforward_slices
+
+logger = logging.getLogger("BacktestingService")
 
 class BacktestingService:
     def __init__(self):
         self.bus = event_bus
-        self.bus.subscribe(BacktestRequested, self.run_replay)
-        self.data = DataProviderEngine()
+        self.bus.subscribe(BacktestRequested, self.on_backtest)
 
-    def run_replay(self, event: BacktestRequested):
-        df = self.data.fetch(event.symbol, event.start, event.end, event.interval)
+    def on_backtest(self, e: BacktestRequested):
+        df = e.df.copy()
+        df = df.sort_index()
+        wf = e.wf_cfg or WalkForwardConfig()
+        feature_cfg = e.feature_cfg or {}
 
-        # full snapshot for training services
-        self.bus.publish(DataSnapshotReady(
-            source="BacktestingService",
-            symbol=event.symbol,
-            df_json=df.to_json(orient="split")
-        ))
+        # Wire services
+        feat = FeatureService(feature_cfg=feature_cfg)
+        strat = StrategyService(strategy_name=e.strategy_name)
+        risk = RiskService()
+        exe = ExecutionService()
+        port = PortfolioService()
+        rep = ReportingService()
 
-        for ts, row in df.iterrows():
-            self.bus.publish(BarDataEvent(
-                source="BacktestingService",
-                symbol=event.symbol,
-                open=float(row["open"]),
-                high=float(row["high"]),
-                low=float(row["low"]),
-                close=float(row["close"]),
-                volume=float(row["volume"]),
-                index_ts=str(ts)
-            ))
+        # Walk-forward replay
+        for i, (train_idx, test_idx) in enumerate(generate_walkforward_slices(df, wf)):
+            # training window
+            feat.reset(in_sample=True, symbol=e.asset_name)
+            for idx in train_idx:
+                row = df.loc[idx]
+                self.bus.publish(BarDataEvent(
+                    source=f"Backtest/train/{i}",
+                    symbol=e.asset_name,
+                    open=float(row['open']), high=float(row['high']), low=float(row['low']),
+                    close=float(row['close']), volume=float(row['volume']),
+                    index=idx
+                ))
+                # portfolio marks to keep equity updated
+                port.mark_price(e.asset_name, float(row['close']))
+
+            # testing window
+            feat.reset(in_sample=False, symbol=e.asset_name)
+            for idx in test_idx:
+                row = df.loc[idx]
+                self.bus.publish(BarDataEvent(
+                    source=f"Backtest/test/{i}",
+                    symbol=e.asset_name,
+                    open=float(row['open']), high=float(row['high']), low=float(row['low']),
+                    close=float(row['close']), volume=float(row['volume']),
+                    index=idx
+                ))
+                port.mark_price(e.asset_name, float(row['close']))
+
+        # end
         self.bus.publish(BacktestCompleted(
-            source="BacktestingService",
-            symbol=event.symbol,
-            strategy_names=event.strategy_names,
-            mode=event.mode,
-            results={}
+            source="BacktestReplay",
+            asset_name=e.asset_name,
+            strategy_name=e.strategy_name,
+            summary=None
         ))
+        logger.info("Backtest completed.")

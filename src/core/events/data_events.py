@@ -1,12 +1,7 @@
-from __future__ import annotations
-from dataclasses import dataclass
-from typing import Optional
-from .base_event import BaseEvent
 
-@dataclass
-class DataSnapshotReady(BaseEvent):
-    symbol: str = ""
-    df_json: str = ""  # Historical dataframe to JSON (orient='split')
+from dataclasses import dataclass
+import pandas as pd
+from .base import BaseEvent
 
 @dataclass
 class BarDataEvent(BaseEvent):
@@ -16,4 +11,11 @@ class BarDataEvent(BaseEvent):
     low: float = 0.0
     close: float = 0.0
     volume: float = 0.0
-    index_ts: Optional[str] = None  # ISO timestamp of bar end
+    index: pd.Timestamp = None  # bar time index
+
+@dataclass
+class FeaturesReady(BaseEvent):
+    symbol: str = ""
+    features_row: pd.Series = None  # last bar features (Series)
+    features_df_tail: pd.DataFrame = None  # optional rolling tail for models
+    in_sample: bool = False  # train window or test window

@@ -1,29 +1,43 @@
-from __future__ import annotations
-from core.event_bus import event_bus
-from core.events import StrategySignalGenerated, RiskAssessmentCompleted, SignalDirection, BarDataEvent
-from risk.position_sizing import AdvancedPositionSizer
-import pandas as pd
+
+import logging
+from core.bus.event_bus import event_bus
+from core.events.strategy_events import StrategySignalGenerated, SignalDirection
+from core.events.risk_events import RiskAssessmentCompleted
+from risk.adaptive_drawdown_manager import AdaptiveDrawdownManager
+
+logger = logging.getLogger("RiskService")
 
 class RiskService:
-    def __init__(self, starting_cash: float=100000.0):
-        self.cash = float(starting_cash)
-        self.price_series = pd.Series(dtype=float)
-        self.sizer = AdvancedPositionSizer()
-        event_bus.subscribe(StrategySignalGenerated, self._on_sig)
-        event_bus.subscribe(BarDataEvent, self._on_bar)
+    def __init__(self, start_cash=100_000.0, max_position_weight_pct=0.10):
+        self.bus = event_bus
+        self.dd = AdaptiveDrawdownManager()
+        self.cash = start_cash
+        self.portfolio_value = start_cash
+        self.max_w = max_position_weight_pct
+        self.bus.subscribe(StrategySignalGenerated, self.on_signal)
+        logger.info("RiskService initialized.")
 
-    def _on_bar(self, evt: BarDataEvent):
-        self.price_series.loc[evt.timestamp] = evt.close
+    def update_equity(self, total_value: float, realized_vol: float = 0.0):
+        self.portfolio_value = total_value
+        self.dd.update_threshold(volatility=realized_vol)
 
-    def _on_sig(self, evt: StrategySignalGenerated):
-        if len(self.price_series) == 0:
+    def on_signal(self, e: StrategySignalGenerated):
+        if e.direction == SignalDirection.HOLD:
             return
-        px = float(self.price_series.iloc[-1])
-        qty_usd = self.sizer.calculate(self.price_series, self.cash + 0.0)
-        qty = qty_usd / max(px, 1e-9)
-        if evt.direction == SignalDirection.HOLD or qty <= 0:
+        # drawdown check
+        if self.dd.check_drawdown(self.portfolio_value):
+            logger.warning("Trade blocked by adaptive drawdown manager.")
             return
-        event_bus.publish(RiskAssessmentCompleted(
-            source="RiskService", symbol=evt.symbol, timestamp=evt.timestamp,
-            direction=evt.direction, quantity=qty, entry_price=px
+        # naive sizing: cap by max position weight
+        dollar = self.portfolio_value * self.max_w * abs(e.strength)
+        qty = 0.0
+        if e.price > 0:
+            qty = dollar / e.price
+        self.bus.publish(RiskAssessmentCompleted(
+            source="RiskService",
+            symbol=e.symbol,
+            direction=e.direction,
+            quantity=qty,
+            price=e.price,
+            rationale=f"strength={e.strength:.2f}, cap={self.max_w:.2f}"
         ))
