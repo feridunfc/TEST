@@ -1,34 +1,39 @@
-
-import logging
-from core.bus.event_bus import event_bus
-from core.events.strategy_events import FeaturesReady, StrategySignalGenerated, SignalDirection
-
-log = logging.getLogger("StrategyService")
+from __future__ import annotations
+import json
+import pandas as pd
+from ..core.bus.event_bus import event_bus
+from ..core.events.strategy_events import FeaturesReady, StrategySignalGenerated, SignalDirection
+from ..engines.signal_generator_engine import SignalGeneratorEngine
 
 class StrategyService:
-    """Simple MA-crossover strategy that emits a per-bar signal.
+    def __init__(self, strategy_params: dict):
+        self.bus = event_bus
+        self.engine = SignalGeneratorEngine(strategy_params)
+        self.bus.subscribe(FeaturesReady, self.on_features)
 
-    - LONG if sma_fast > sma_slow, SHORT if sma_fast < sma_slow, FLAT otherwise.
-    """
-    def __init__(self, name: str = "ma_crossover") -> None:
-        self.name = name
-        event_bus.subscribe(FeaturesReady, self.on_features)
+        # keep small rolling features frame to help AI predict
+        self._feat_roll = []
 
-    def on_features(self, ev: FeaturesReady) -> None:
-        f = ev.features or {}
-        sf, ss = f.get('sma_fast'), f.get('sma_slow')
-        if sf is None or ss is None:
-            return
-        if sf > ss:
-            sig = SignalDirection.LONG
-        elif sf < ss:
-            sig = SignalDirection.SHORT
-        else:
-            sig = SignalDirection.FLAT
-        event_bus.publish(StrategySignalGenerated(
-            source="StrategyService",
-            symbol=ev.symbol,
-            dt=ev.dt,
-            signal=sig,
-            meta={'strategy': self.name}
-        ))
+    def on_features(self, event: FeaturesReady):
+        row = pd.read_json(event.features_json, typ='series')
+        self._feat_roll.append(row)
+        if len(self._feat_roll) > 400:
+            self._feat_roll = self._feat_roll[-400:]
+        features_df = pd.DataFrame(self._feat_roll)
+
+        for name in self.engine.strategies.keys():
+            # Ensure trained if needed
+            try:
+                self.engine.ensure_trained(name, features_df)
+            except Exception:
+                pass
+            sig = self.engine.signal_for_bar(name, features_df)
+            direction = SignalDirection(sig)
+            self.bus.publish(StrategySignalGenerated(
+                source="StrategyService",
+                symbol=event.symbol,
+                strategy_name=name,
+                direction=direction,
+                price=float(row["close"]),
+                metadata={"features": row.to_dict()}
+            ))

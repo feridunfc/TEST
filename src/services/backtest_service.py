@@ -1,52 +1,41 @@
-
-import logging
-import pandas as pd
-from core.bus.event_bus import event_bus
-from core.events.backtest_events import BacktestRequested, BacktestCompleted
-from core.events.data_events import DataFetchRequested, BarDataEvent, CleanedDataReady
-
-log = logging.getLogger("BacktestingService")
+from __future__ import annotations
+import json
+from ..core.bus.event_bus import event_bus
+from ..core.events.backtest_events import BacktestRequested, BacktestCompleted
+from ..core.events.data_events import BarDataEvent, DataSnapshotReady
+from ..engines.data_provider_engine import DataProviderEngine
 
 class BacktestingService:
-    """Replay-only engine.
+    def __init__(self):
+        self.bus = event_bus
+        self.bus.subscribe(BacktestRequested, self.run_replay)
+        self.data = DataProviderEngine()
 
-    - Listens to BacktestRequested
+    def run_replay(self, event: BacktestRequested):
+        df = self.data.fetch(event.symbol, event.start, event.end, event.interval)
 
-    - Triggers DataFetchRequested
-
-    - On CleanedDataReady, replays bars as BarDataEvent
-
-    - Emits BacktestCompleted when done
-
-    """
-    def __init__(self) -> None:
-        event_bus.subscribe(BacktestRequested, self.on_start)
-        event_bus.subscribe(CleanedDataReady, self.on_data)
-
-    def on_start(self, ev: BacktestRequested) -> None:
-        self._current = ev
-        log.info(f"[BacktestingService] Starting replay for {ev.symbol} {ev.start}→{ev.end} {ev.interval}")
-        event_bus.publish(DataFetchRequested(
+        # full snapshot for training services
+        self.bus.publish(DataSnapshotReady(
             source="BacktestingService",
-            symbol=ev.symbol, start=ev.start, end=ev.end, interval=ev.interval
+            symbol=event.symbol,
+            df_json=df.to_json(orient="split")
         ))
 
-    def on_data(self, ev: CleanedDataReady) -> None:
-        # Replay historical bars
-        df = ev.df
-        for dt, row in df.iterrows():
-            event_bus.publish(BarDataEvent(
-                source="BacktestingService.replay",
-                symbol=ev.symbol, dt=dt,
-                open=float(row['open']), high=float(row['high']), low=float(row['low']),
-                close=float(row['close']), volume=float(row['volume'])
+        for ts, row in df.iterrows():
+            self.bus.publish(BarDataEvent(
+                source="BacktestingService",
+                symbol=event.symbol,
+                open=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
+                volume=float(row["volume"]),
+                index_ts=str(ts)
             ))
-        # Signal completion
-        bt = getattr(self, "_current", None)
-        event_bus.publish(BacktestCompleted(
+        self.bus.publish(BacktestCompleted(
             source="BacktestingService",
-            symbol=ev.symbol,
-            strategy=(bt.strategy if bt else "unknown"),
+            symbol=event.symbol,
+            strategy_names=event.strategy_names,
+            mode=event.mode,
             results={}
         ))
-        log.info("[BacktestingService] Replay completed.")

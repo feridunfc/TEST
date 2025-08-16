@@ -1,30 +1,36 @@
-
-import logging
-from core.bus.event_bus import event_bus
-from core.events.strategy_events import StrategySignalGenerated, SignalDirection
-from core.events.risk_events import RiskAssessmentCompleted
-
-log = logging.getLogger("RiskService")
+from __future__ import annotations
+import json
+from ..core.bus.event_bus import event_bus
+from ..core.events.strategy_events import StrategySignalGenerated, SignalDirection
+from ..core.events.risk_events import RiskAssessmentCompleted
+from ..engines.risk_manager_engine import RiskManagerEngine
+from ..configs.main_config import RiskConfig
 
 class RiskService:
-    """Pass-through risk with optional gross cap. Extend later with vol targeting / max DD constraints."""
-    def __init__(self, gross_cap: float = 1.0) -> None:
-        self.gross_cap = float(gross_cap)
-        event_bus.subscribe(StrategySignalGenerated, self.on_signal)
+    def __init__(self, cfg: RiskConfig):
+        self.bus = event_bus
+        self.engine = RiskManagerEngine(cfg)
+        self.current_equity = cfg.initial_cash
+        self.atr_last = 1.0
+        self.vol_last = cfg.vol_target_annual
+        self.bus.subscribe(StrategySignalGenerated, self.on_signal)
 
-    def on_signal(self, ev: StrategySignalGenerated) -> None:
-        # Convert discrete signal to target position within [-gross_cap, +gross_cap]
-        mapping = {
-            SignalDirection.SHORT: -self.gross_cap,
-            SignalDirection.LONG: +self.gross_cap,
-            SignalDirection.FLAT: 0.0,
-        }
-        pos = float(mapping.get(ev.signal, 0.0))
-        rationale = f"pass_through; gross_cap={self.gross_cap}"
-        event_bus.publish(RiskAssessmentCompleted(
+    def on_signal(self, event: StrategySignalGenerated):
+        price = event.price
+        # ATR/Vol placeholders: can be enhanced with true ATR
+        decision = self.engine.assess_trade(price, event.direction, self.atr_last, self.current_equity, self.vol_last)
+        self.bus.publish(RiskAssessmentCompleted(
             source="RiskService",
-            symbol=ev.symbol,
-            dt=ev.dt,
-            desired_position=pos,
-            rationale=rationale
+            symbol=event.symbol,
+            strategy_name=event.strategy_name,
+            direction=event.direction,
+            position_size_pct=decision.position_size_pct,
+            stop_loss_price=decision.stop_loss_price,
+            take_profit_price=decision.take_profit_price,
+            rationale=decision.rationale,
+            price=price
         ))
+
+    def update_equity(self, equity_value: float):
+        self.current_equity = equity_value
+        self.engine.update_equity(equity_value)

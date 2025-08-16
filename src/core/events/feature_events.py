@@ -1,8 +1,10 @@
-from __future__ import annotations
+
+# core/events/feature_events.py
 from dataclasses import dataclass
 import pandas as pd
+from .base import BaseEvent
 
-@dataclass(frozen=True)
-class FeaturesReady:
-    symbol: str
-    features_df: pd.DataFrame
+@dataclass
+class FeaturesReady(BaseEvent):
+    symbol: str = "SPY"
+    features_df: pd.DataFrame = pd.DataFrame()  # usually a single-row DataFrame (last bar features)

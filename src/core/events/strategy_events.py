@@ -1,22 +1,23 @@
-
-from dataclasses import dataclass
+from __future__ import annotations
+from dataclasses import dataclass, field
 from enum import IntEnum
-from .base import BaseEvent
+from typing import Dict, Any
+from .base_event import BaseEvent
 
 class SignalDirection(IntEnum):
     SHORT = -1
-    FLAT = 0
+    HOLD = 0
     LONG = 1
 
 @dataclass
 class FeaturesReady(BaseEvent):
-    symbol: str = "SPY"
-    dt = None
-    features: dict = None  # e.g., { 'sma_fast': 100, 'sma_slow': 120, 'ret': 0.001 }
+    symbol: str = ""
+    features_json: str = ""  # bar-aligned features (single row) to JSON
 
 @dataclass
 class StrategySignalGenerated(BaseEvent):
-    symbol: str = "SPY"
-    dt = None
-    signal: SignalDirection = SignalDirection.FLAT
-    meta: dict = None  # e.g., thresholds, model_name, params
+    symbol: str = ""
+    strategy_name: str = ""
+    direction: SignalDirection = SignalDirection.HOLD
+    price: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)

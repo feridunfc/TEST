@@ -1,9 +1,8 @@
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
 
 @dataclass
 class BaseEvent:
-    source: str = "system"
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    source: str
+    timestamp: datetime
