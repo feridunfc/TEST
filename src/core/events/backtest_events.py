@@ -1,19 +1,16 @@
 
 from dataclasses import dataclass
+from typing import Dict, Any
 import pandas as pd
-from .base import BaseEvent
 
 @dataclass
-class BacktestRequested(BaseEvent):
-    asset_name: str = ""
-    strategy_name: str = "hybrid_v1"
-    df: pd.DataFrame = None
-    wf_cfg: object = None
-    feature_cfg: dict = None
-    backtest_params: dict = None
+class BacktestRequested:
+    source: str
+    df: pd.DataFrame
+    strategy_name: str
+    params: Dict[str, Any]
 
 @dataclass
-class BacktestCompleted(BaseEvent):
-    asset_name: str = ""
-    strategy_name: str = ""
-    summary: dict = None
+class BacktestCompleted:
+    source: str
+    summary: Dict[str, Any]

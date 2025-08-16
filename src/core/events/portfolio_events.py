@@ -1,9 +1,8 @@
 
 from dataclasses import dataclass
-from .base import BaseEvent
+import pandas as pd
 
 @dataclass
-class PortfolioUpdated(BaseEvent):
-    cash: float = 0.0
-    total_value: float = 0.0
-    positions: dict = None
+class PortfolioUpdated:
+    source: str
+    equity_curve: pd.Series

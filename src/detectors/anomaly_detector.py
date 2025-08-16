@@ -1,34 +1,24 @@
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
-try:
-    from sklearn.ensemble import IsolationForest
-except Exception:
-    IsolationForest = None
+def anomaly_zscore(series: pd.Series, lookback: int = 60) -> pd.Series:
+    mu = series.rolling(lookback).mean()
+    sd = series.rolling(lookback).std()
+    z = (series - mu) / (sd + 1e-9)
+    score = np.tanh(np.abs(z) / 3)
+    return score.rename("anomaly_score")
 
-class AnomalyDetector:
-    def __init__(self, method='iforest', contamination=0.02, zscore_window=50, z_thresh=3.0):
-        self.method = method
-        self.contamination = contamination
-        self.zscore_window = zscore_window
-        self.z_thresh = z_thresh
-        self.model = None
-
-    def fit_predict(self, df: pd.DataFrame) -> pd.Series:
-        # simple features: returns and volume change
-        feats = pd.DataFrame({
-            'r': df['close'].pct_change().fillna(0.0),
-            'v': df['volume'].pct_change().replace([np.inf, -np.inf], 0.0).fillna(0.0)
-        }, index=df.index)
-
-        if self.method == 'iforest' and IsolationForest is not None:
-            self.model = IsolationForest(contamination=self.contamination, random_state=42)
-            lab = self.model.fit_predict(feats.values)
-            # sklearn: -1 anomaly, 1 normal
-            anom = pd.Series((lab == -1).astype(int), index=df.index)
-            return anom
-        else:
-            # z-score fallback
-            z = (feats['r'] - feats['r'].rolling(self.zscore_window).mean()) / feats['r'].rolling(self.zscore_window).std()
-            return (z.abs() > self.z_thresh).astype(int).fillna(0)
+def compute_anomaly(df: pd.DataFrame, ret_col: str = "close", method: str = "zscore") -> pd.Series:
+    rets = df[ret_col].pct_change().fillna(0.0)
+    if method == "zscore":
+        return anomaly_zscore(rets)
+    try:
+        from sklearn.ensemble import IsolationForest
+        X = rets.to_frame("r").fillna(0.0).values
+        iso = IsolationForest(n_estimators=100, contamination=0.02, random_state=42)
+        s = -iso.fit_predict(X)
+        s = pd.Series(s, index=rets.index).rolling(5).mean().fillna(0.0)
+        return s.rename("anomaly_score")
+    except Exception:
+        return anomaly_zscore(rets)
