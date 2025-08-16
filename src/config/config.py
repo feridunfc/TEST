@@ -1,6 +1,5 @@
-from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional
+from typing import Optional, List
 
 @dataclass
 class DataConfig:
@@ -9,41 +8,41 @@ class DataConfig:
     start: str = "2015-01-01"
     end: Optional[str] = None
     interval: str = "1d"
+    csv_path: Optional[str] = None
+    parquet_path: Optional[str] = None
+    auto_adjust: bool = True
+    tz: Optional[str] = None
 
 @dataclass
 class FeesConfig:
-    commission: float = 0.0005  # 5 bps one-way commission
-    slippage_bps: float = 1.0   # 1 bp slippage per trade
+    commission: float = 0.0005
+    slippage_bps: float = 1.0
 
 @dataclass
 class RiskConfig:
-    vol_target: float = 0.15       # annualized target volatility
-    max_drawdown: float = 0.25     # portfolio-level hard stop
-    position_cap: float = 1.0      # |position| <= 1.0 (100% of capital)
+    target_annual_vol: float = 0.20
+    lookback_days: int = 30
+    max_position_weight_pct: float = 0.10
+    max_drawdown_cap: float = 0.20
 
 @dataclass
 class BacktestConfig:
-    walkforward_splits: int = 5
-    rebalance_delay: int = 1  # bars delay to avoid look-ahead
-    cash: float = 1.0
+    walkforward_splits: int = 1
+    threshold: float = 0.5
+    seed: int = 42
+
+@dataclass
+class UIConfig:
+    default_models: List[str] = field(default_factory=lambda: ["random_forest"])
+    default_strategies: List[str] = field(default_factory=lambda: ["ma_crossover"])
 
 @dataclass
 class AppConfig:
     data: DataConfig = field(default_factory=DataConfig)
     fees: FeesConfig = field(default_factory=FeesConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
-    backtest: BacktestConfig = field(default_factory=BacktestConfig)
+    bt: BacktestConfig = field(default_factory=BacktestConfig)
+    ui: UIConfig = field(default_factory=UIConfig)
 
-def load_config(overrides: Optional[Dict[str, Any]] = None) -> AppConfig:
-    cfg = AppConfig()
-    if overrides:
-        # shallow override: cfg.<section>.<key> = value
-        for k, v in overrides.items():
-            if hasattr(cfg, k) and isinstance(v, dict):
-                section = getattr(cfg, k)
-                for kk, vv in v.items():
-                    if hasattr(section, kk):
-                        setattr(section, kk, vv)
-            elif hasattr(cfg, k):
-                setattr(cfg, k, v)
-    return cfg
+def load_config() -> AppConfig:
+    return AppConfig()
