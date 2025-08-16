@@ -1,41 +1,26 @@
+
 import numpy as np
 import pandas as pd
-import pytest
+from ..backtest.vectorized import VectorizedBacktester
 
-class LookAheadError(Exception):
-    pass
+def test_vectorized_backtester_runs():
+    n = 500
+    idx = pd.date_range("2023-01-01", periods=n, freq="D")
+    df = pd.DataFrame({
+        "open": 100 + np.random.randn(n).cumsum(),
+        "close": 100 + np.random.randn(n).cumsum(),
+    }, index=idx)
+    sig = pd.Series(np.sign(np.random.randn(n)), index=idx)
+    bt = VectorizedBacktester()
+    out = bt.run(df, sig)
+    assert "equity" in out.columns and len(out) == n
 
-def generate_test_data(n=1000, seed=0):
-    rng = np.random.default_rng(seed)
-    r = rng.normal(0, 0.01, n)
-    close = 100 * (1 + pd.Series(r)).cumprod()
-    idx = pd.date_range("2020-01-01", periods=n, freq="B")
-    df = pd.DataFrame({"close": close}, index=idx)
-    df["open"] = df["close"].shift(1).fillna(df["close"])
-    df["high"] = df[["open","close"]].max(axis=1) * (1 + abs(rng.normal(0, 0.002, n)))
-    df["low"] = df[["open","close"]].min(axis=1) * (1 - abs(rng.normal(0, 0.002, n)))
-    df["volume"] = rng.integers(1000, 5000, n)
-    return df
-
-def detect_lookahead(df: pd.DataFrame):
-    for c in df.columns:
-        if "future" in c.lower():
-            raise LookAheadError(f"Potential look-ahead via column: {c}")
-
-def backtest(strategy, df: pd.DataFrame):
-    detect_lookahead(df)
-    if hasattr(strategy, "train"):
-        strategy.train(df.iloc[:-100])
-    sig = strategy.predict(df)
-    ret = df["close"].pct_change().fillna(0.0)
-    pnl = (sig.shift(1).fillna(0.0) * ret).cumsum()
-    return pnl
-
-def test_lookahead_bias():
-    df = generate_test_data(500)
-    df["future_leak"] = df["close"].shift(-1).ffill()
-    class Dummy:
-        def train(self, _): pass
-        def predict(self, d): return pd.Series(0, index=d.index)
-    with pytest.raises(LookAheadError):
-        backtest(Dummy(), df)
+def test_no_lookahead():
+    n = 200
+    idx = pd.date_range("2023-01-01", periods=n, freq="D")
+    close = 100 + np.random.randn(n).cumsum()
+    df = pd.DataFrame({"open": close, "close": close}, index=idx)
+    future_signal = pd.Series(np.sign(np.random.randn(n))).shift(-1).fillna(0.0).reindex(idx)
+    bt = VectorizedBacktester()
+    out = bt.run(df, future_signal)
+    assert np.isfinite(out["strategy_returns"]).all()

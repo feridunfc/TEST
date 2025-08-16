@@ -1,48 +1,62 @@
+
 import numpy as np
 import pandas as pd
-from dataclasses import dataclass
-from typing import Dict
-
-TRADING_DAYS = 252
-
-@dataclass
-class Metrics:
-    sharpe: float
-    sortino: float
-    max_drawdown: float
-    calmar: float
-    annual_return: float
-    win_rate: float
 
 class MetricsEngine:
     @staticmethod
-    def _returns_from_equity(equity: pd.Series) -> pd.Series:
-        r = equity.pct_change().dropna()
-        return r.replace([np.inf, -np.inf], np.nan).dropna()
+    def _annualize(mean_daily, std_daily):
+        return (mean_daily * 252.0), (std_daily * np.sqrt(252.0))
 
     @staticmethod
-    def compute_all(equity: pd.Series) -> Dict[str, float]:
-        if not isinstance(equity, pd.Series) or equity.empty:
-            return {k: 0.0 for k in ["sharpe","sortino","max_drawdown","calmar","annual_return","win_rate"]}
-        r = MetricsEngine._returns_from_equity(equity)
-        if r.empty:
-            return {k: 0.0 for k in ["sharpe","sortino","max_drawdown","calmar","annual_return","win_rate"]}
-        mu = r.mean() * TRADING_DAYS
-        sigma = r.std(ddof=1) * np.sqrt(TRADING_DAYS)
-        downside = r[r < 0].std(ddof=1) * np.sqrt(TRADING_DAYS)
-        sharpe = float(mu / sigma) if sigma and sigma > 0 else 0.0
-        sortino = float(mu / downside) if downside and downside > 0 else 0.0
-        cum = (1 + r).cumprod()
-        dd = (cum / cum.cummax() - 1).min()
-        max_dd = float(dd) if isinstance(dd, (float, np.floating)) else float(dd.values[0])
-        annual_return = float(mu)
-        calmar = float(annual_return / abs(max_dd)) if max_dd < 0 else 0.0
-        win_rate = float((r > 0).mean())
+    def sharpe(returns: pd.Series, rf_daily: float = 0.0) -> float:
+        r = returns.dropna() - rf_daily
+        if r.std() == 0 or len(r) < 2:
+            return 0.0
+        return np.sqrt(252.0) * r.mean() / r.std()
+
+    @staticmethod
+    def sortino(returns: pd.Series, rf_daily: float = 0.0) -> float:
+        r = returns.dropna() - rf_daily
+        downside = r[r < 0]
+        if downside.std() == 0 or len(r) < 2:
+            return 0.0
+        return np.sqrt(252.0) * r.mean() / downside.std()
+
+    @staticmethod
+    def max_drawdown(equity: pd.Series) -> float:
+        if equity.isna().all():
+            return 0.0
+        peak = equity.cummax()
+        dd = equity / peak - 1.0
+        return dd.min()
+
+    @staticmethod
+    def annual_return(equity: pd.Series) -> float:
+        if len(equity.dropna()) < 2:
+            return 0.0
+        total_return = equity.dropna().iloc[-1] / equity.dropna().iloc[0] - 1.0
+        years = len(equity.dropna()) / 252.0
+        if years <= 0:
+            return 0.0
+        return (1 + total_return) ** (1 / years) - 1
+
+    @staticmethod
+    def win_rate(returns: pd.Series) -> float:
+        r = returns.dropna()
+        if len(r) == 0:
+            return 0.0
+        return (r > 0).mean()
+
+    @classmethod
+    def compute_all(cls, equity: pd.Series) -> dict:
+        rets = equity.pct_change().fillna(0.0)
+        maxdd = cls.max_drawdown(equity)
+        annret = cls.annual_return(equity)
         return {
-            "sharpe": sharpe,
-            "sortino": sortino,
-            "max_drawdown": max_dd,
-            "calmar": calmar,
-            "annual_return": annual_return,
-            "win_rate": win_rate,
+            "sharpe": float(cls.sharpe(rets)),
+            "sortino": float(cls.sortino(rets)),
+            "max_drawdown": float(maxdd),
+            "calmar": float((annret / abs(maxdd)) if maxdd != 0 else 0.0),
+            "annual_return": float(annret),
+            "win_rate": float(cls.win_rate(rets)),
         }

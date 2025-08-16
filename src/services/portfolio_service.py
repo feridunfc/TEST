@@ -1,29 +1,65 @@
-from __future__ import annotations
-import json
-from ..core.bus.event_bus import event_bus
-from ..core.events.order_portfolio_events import OrderFilled, PortfolioUpdated
-from ..core.events.data_events import BarDataEvent
-from ..engines.portfolio_manager_engine import PortfolioManagerEngine
+
+from dataclasses import dataclass
+from typing import Any, Dict
+
+try:
+    from core.bus.event_bus import event_bus as default_bus
+    from core.events.order_events import OrderFilled
+    from core.events.portfolio_events import PortfolioUpdated
+except Exception:
+    class SimpleBus:
+        def __init__(self):
+            self.subs = {}
+        def subscribe(self, etype, cb):
+            self.subs.setdefault(etype, []).append(cb)
+        def publish(self, e):
+            for cb in self.subs.get(type(e), []):
+                cb(e)
+    default_bus = SimpleBus()
+    @dataclass
+    class OrderFilled:
+        source: str
+        symbol: str
+        side: str
+        quantity: float
+        avg_price: float
+        timestamp: Any
+    @dataclass
+    class PortfolioUpdated:
+        source: str
+        timestamp: Any
+        cash: float
+        total_value: float
+        positions: Dict[str, float]
 
 class PortfolioService:
-    def __init__(self, initial_cash: float = 100000.0):
-        self.bus = event_bus
-        self.engine = PortfolioManagerEngine(initial_cash=initial_cash)
-        self.prices = {}
-        self.bus.subscribe(OrderFilled, self.on_filled)
-        self.bus.subscribe(BarDataEvent, self.on_bar)
+    def __init__(self, start_cash: float = 100000.0, bus=None):
+        self.bus = bus or default_bus
+        self.cash = start_cash
+        self.positions: Dict[str, float] = {}
+        self.prices: Dict[str, float] = {}
+        self.bus.subscribe(OrderFilled, self.on_fill)
 
-    def on_filled(self, event: OrderFilled):
-        self.engine.on_fill(event.symbol, event.quantity, event.price, ts="now")
+    def mark_price(self, symbol: str, price: float):
+        self.prices[symbol] = price
 
-    def on_bar(self, event: BarDataEvent):
-        self.prices[event.symbol] = event.close
-        self.engine.mark_to_market({event.symbol: event.close}, ts=event.index_ts)
-        eq = self.engine.state.total_value
+    def _calc_total_value(self) -> float:
+        pv = self.cash
+        for sym, qty in self.positions.items():
+            px = self.prices.get(sym, 0.0)
+            pv += qty * px
+        return pv
+
+    def on_fill(self, event: 'OrderFilled'):
+        qty = event.quantity if event.side.upper() == "BUY" else -event.quantity
+        self.positions[event.symbol] = self.positions.get(event.symbol, 0.0) + qty
+        self.cash -= qty * event.avg_price
+        self.mark_price(event.symbol, event.avg_price)
+        total = self._calc_total_value()
         self.bus.publish(PortfolioUpdated(
             source="PortfolioService",
-            symbol=event.symbol,
-            total_value=eq,
-            cash=self.engine.state.cash,
-            positions_json=json.dumps(self.engine.state.positions)
+            timestamp=event.timestamp,
+            cash=self.cash,
+            total_value=total,
+            positions=self.positions.copy()
         ))
