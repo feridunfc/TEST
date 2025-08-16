@@ -1,62 +1,40 @@
+from __future__ import annotations
+import numpy as np, pandas as pd
 
-import numpy as np
-import pandas as pd
+def max_drawdown(equity: pd.Series) -> float:
+    roll_max = equity.cummax()
+    dd = equity/roll_max - 1.0
+    return float(dd.min())
 
-class MetricsEngine:
-    @staticmethod
-    def _annualize(mean_daily, std_daily):
-        return (mean_daily * 252.0), (std_daily * np.sqrt(252.0))
+def sharpe(returns: pd.Series, rf_daily: float=0.0) -> float:
+    r = returns.dropna() - rf_daily
+    sd = r.std()
+    if sd == 0 or np.isnan(sd):
+        return 0.0
+    return float((r.mean()/sd) * (252**0.5))
 
-    @staticmethod
-    def sharpe(returns: pd.Series, rf_daily: float = 0.0) -> float:
-        r = returns.dropna() - rf_daily
-        if r.std() == 0 or len(r) < 2:
-            return 0.0
-        return np.sqrt(252.0) * r.mean() / r.std()
+def sortino(returns: pd.Series, rf_daily: float=0.0) -> float:
+    r = returns.dropna() - rf_daily
+    downside = r[r<0].std()
+    if downside == 0 or np.isnan(downside):
+        return 0.0
+    return float((r.mean()/downside) * (252**0.5))
 
-    @staticmethod
-    def sortino(returns: pd.Series, rf_daily: float = 0.0) -> float:
-        r = returns.dropna() - rf_daily
-        downside = r[r < 0]
-        if downside.std() == 0 or len(r) < 2:
-            return 0.0
-        return np.sqrt(252.0) * r.mean() / downside.std()
+def annual_return(returns: pd.Series) -> float:
+    r = returns.fillna(0.0)
+    cum = (1+r).prod()
+    years = len(r)/252
+    if years <= 0:
+        return 0.0
+    return float(cum**(1/years) - 1.0)
 
-    @staticmethod
-    def max_drawdown(equity: pd.Series) -> float:
-        if equity.isna().all():
-            return 0.0
-        peak = equity.cummax()
-        dd = equity / peak - 1.0
-        return dd.min()
-
-    @staticmethod
-    def annual_return(equity: pd.Series) -> float:
-        if len(equity.dropna()) < 2:
-            return 0.0
-        total_return = equity.dropna().iloc[-1] / equity.dropna().iloc[0] - 1.0
-        years = len(equity.dropna()) / 252.0
-        if years <= 0:
-            return 0.0
-        return (1 + total_return) ** (1 / years) - 1
-
-    @staticmethod
-    def win_rate(returns: pd.Series) -> float:
-        r = returns.dropna()
-        if len(r) == 0:
-            return 0.0
-        return (r > 0).mean()
-
-    @classmethod
-    def compute_all(cls, equity: pd.Series) -> dict:
-        rets = equity.pct_change().fillna(0.0)
-        maxdd = cls.max_drawdown(equity)
-        annret = cls.annual_return(equity)
-        return {
-            "sharpe": float(cls.sharpe(rets)),
-            "sortino": float(cls.sortino(rets)),
-            "max_drawdown": float(maxdd),
-            "calmar": float((annret / abs(maxdd)) if maxdd != 0 else 0.0),
-            "annual_return": float(annret),
-            "win_rate": float(cls.win_rate(rets)),
-        }
+def summarize(df_bt: pd.DataFrame) -> dict:
+    eq = df_bt["equity"]
+    rets = df_bt["returns"]
+    return {
+        "sharpe": sharpe(rets),
+        "sortino": sortino(rets),
+        "max_dd": max_drawdown(eq),
+        "annual_return": annual_return(rets),
+        "last_equity": float(eq.iloc[-1])
+    }

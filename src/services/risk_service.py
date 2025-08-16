@@ -1,36 +1,29 @@
 from __future__ import annotations
-import json
-from ..core.bus.event_bus import event_bus
-from ..core.events.strategy_events import StrategySignalGenerated, SignalDirection
-from ..core.events.risk_events import RiskAssessmentCompleted
-from ..engines.risk_manager_engine import RiskManagerEngine
-from ..configs.main_config import RiskConfig
+from core.event_bus import event_bus
+from core.events import StrategySignalGenerated, RiskAssessmentCompleted, SignalDirection, BarDataEvent
+from risk.position_sizing import AdvancedPositionSizer
+import pandas as pd
 
 class RiskService:
-    def __init__(self, cfg: RiskConfig):
-        self.bus = event_bus
-        self.engine = RiskManagerEngine(cfg)
-        self.current_equity = cfg.initial_cash
-        self.atr_last = 1.0
-        self.vol_last = cfg.vol_target_annual
-        self.bus.subscribe(StrategySignalGenerated, self.on_signal)
+    def __init__(self, starting_cash: float=100000.0):
+        self.cash = float(starting_cash)
+        self.price_series = pd.Series(dtype=float)
+        self.sizer = AdvancedPositionSizer()
+        event_bus.subscribe(StrategySignalGenerated, self._on_sig)
+        event_bus.subscribe(BarDataEvent, self._on_bar)
 
-    def on_signal(self, event: StrategySignalGenerated):
-        price = event.price
-        # ATR/Vol placeholders: can be enhanced with true ATR
-        decision = self.engine.assess_trade(price, event.direction, self.atr_last, self.current_equity, self.vol_last)
-        self.bus.publish(RiskAssessmentCompleted(
-            source="RiskService",
-            symbol=event.symbol,
-            strategy_name=event.strategy_name,
-            direction=event.direction,
-            position_size_pct=decision.position_size_pct,
-            stop_loss_price=decision.stop_loss_price,
-            take_profit_price=decision.take_profit_price,
-            rationale=decision.rationale,
-            price=price
+    def _on_bar(self, evt: BarDataEvent):
+        self.price_series.loc[evt.timestamp] = evt.close
+
+    def _on_sig(self, evt: StrategySignalGenerated):
+        if len(self.price_series) == 0:
+            return
+        px = float(self.price_series.iloc[-1])
+        qty_usd = self.sizer.calculate(self.price_series, self.cash + 0.0)
+        qty = qty_usd / max(px, 1e-9)
+        if evt.direction == SignalDirection.HOLD or qty <= 0:
+            return
+        event_bus.publish(RiskAssessmentCompleted(
+            source="RiskService", symbol=evt.symbol, timestamp=evt.timestamp,
+            direction=evt.direction, quantity=qty, entry_price=px
         ))
-
-    def update_equity(self, equity_value: float):
-        self.current_equity = equity_value
-        self.engine.update_equity(equity_value)
