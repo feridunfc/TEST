@@ -1,59 +1,90 @@
 from __future__ import annotations
-import pandas as pd
 import numpy as np
-from typing import Dict, Any, Callable, Optional
+import pandas as pd
+from dataclasses import dataclass
+from typing import Callable, Dict, Any, List, Optional, Tuple
 from sklearn.model_selection import TimeSeriesSplit
-from backtesting.adapter import run_backtest_adapter
 
-def walk_forward_run(
-    df_price: pd.DataFrame,
-    df_features: pd.DataFrame,
-    y: pd.Series,
-    strategy_factory: Callable[..., Any],  # returns an object with fit() and predict_proba()
-    strategy_params: Dict[str, Any],
-    n_splits: int = 5,
-    test_size: int = 60,
-    initial_cash: float = 100_000.0,
-    commission_bps: int = 5,
-    slippage_bps: int = 5,
-) -> Dict[str, Any]:
-    """TimeSeriesSplit walk-forward with per-fold backtests.
+@dataclass
+class FoldResult:
+    fold: int
+    start: str
+    end: str
+    sharpe: float
+    sortino: float
+    maxdd: float
+    calmar: float
+    ann_return: float
+    ann_vol: float
+    trades: int
 
-    Returns a dict with fold metrics and combined equity.
+def _to_returns(prices: pd.Series) -> pd.Series:
+    return np.log(prices / prices.shift(1)).fillna(0.0)
+
+def _equity_from_signals(prices: pd.Series, signals: pd.Series, tc_bps: float = 0.0) -> pd.Series:
+    # signals in {-1,0,+1}; apply T+1 execution at open (approx: shift position by 1)
+    pos = signals.shift(1).fillna(0.0)
+    rets = _to_returns(prices) * pos
+    # simple transaction cost on position change
+    tc = (pos.diff().abs().fillna(0.0)) * (tc_bps / 10000.0)
+    rets = rets - tc
+    equity = (1.0 + rets).cumprod()
+    return equity
+
+def _metrics_from_equity(eq: pd.Series) -> Dict[str, float]:
+    rets = eq.pct_change().dropna()
+    if rets.empty:
+        return dict(sharpe=0.0, sortino=0.0, maxdd=0.0, calmar=0.0, ann_return=0.0, ann_vol=0.0, trades=0)
+    mu = rets.mean() * 252
+    vol = rets.std(ddof=0) * np.sqrt(252)
+    sharpe = (mu / vol) if vol > 0 else 0.0
+    neg = rets[rets < 0]
+    dvol = neg.std(ddof=0) * np.sqrt(252)
+    sortino = (mu / dvol) if dvol > 0 else 0.0
+    peak = eq.cummax()
+    dd = (peak - eq) / peak
+    maxdd = dd.max() if len(dd) else 0.0
+    calmar = (mu / maxdd) if maxdd > 1e-9 else 0.0
+    return dict(sharpe=float(sharpe), sortino=float(sortino), maxdd=float(maxdd),
+                calmar=float(calmar), ann_return=float(mu), ann_vol=float(vol), trades=int((pos_changes:=0)))
+
+class WalkForwardRunner:
+    """Walk-forward analizi: strategy.fit(train) → predict(test) → metrics.
+    Strategy API:
+      - train(X_train: DataFrame, y_train: Series/None) -> None
+      - predict_signals(X_test: DataFrame) -> Series in {-1,0,+1}
     """
-    # Align features/target to common index
-    common = df_features.index.intersection(y.index).intersection(df_price.index)
-    X = df_features.loc[common]
-    yy = y.loc[common]
-    px = df_price.loc[common]
+    def __init__(self, n_splits: int = 5, test_size: Optional[int] = None, tc_bps: float = 0.0):
+        self.n_splits = n_splits
+        self.test_size = test_size
+        self.tc_bps = tc_bps
 
-    tscv = TimeSeriesSplit(n_splits=n_splits, test_size=test_size)
-    fold_rows = []
-    equities = []
-
-    for fold, (tr_idx, te_idx) in enumerate(tscv.split(X)):
-        X_tr, y_tr = X.iloc[tr_idx], yy.iloc[tr_idx]
-        X_te, y_te = X.iloc[te_idx], yy.iloc[te_idx]
-        px_te = px.iloc[te_idx]
-
-        strat = strategy_factory(**strategy_params)
-        strat.fit(X_tr, y_tr)
-
-        proba = strat.predict_proba(X_te)
-        sig = strat.signals_from_proba(proba)
-        signals = pd.Series(sig, index=X_te.index, name="signal")
-
-        rep = run_backtest_adapter(px, signals, initial_cash=initial_cash,
-                                   commission_bps=commission_bps, slippage_bps=slippage_bps)
-        equity = rep["equity"]
-        equities.append(equity)
-
-        stats = rep["stats"]
-        row = {"fold": fold, **stats}
-        fold_rows.append(row)
-
-    # Combine equities (align & average)
-    eq_df = pd.concat(equities, axis=1)
-    eq_df.columns = [f"eq_fold_{i}" for i in range(eq_df.shape[1])]
-    eq_df = eq_df.ffill().dropna(how="all")
-    return {"fold_metrics": pd.DataFrame(fold_rows), "equities": eq_df}
+    def run(self,
+            features: pd.DataFrame,
+            prices: pd.Series,
+            strategy_factory: Callable[..., Any],
+            strategy_params: Dict[str, Any]) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        tscv = TimeSeriesSplit(n_splits=self.n_splits, test_size=self.test_size)
+        fold_rows: List[Dict[str, Any]] = []
+        eq_curves = {}
+        for fold, (tr_idx, te_idx) in enumerate(tscv.split(features), start=1):
+            X_tr, X_te = features.iloc[tr_idx], features.iloc[te_idx]
+            p_tr, p_te = prices.iloc[te_idx[0]:te_idx[-1]+1], prices.iloc[te_idx]  # price segment aligned
+            strat = strategy_factory(**strategy_params)
+            # Some strategies may expect y, we pass None by default
+            if hasattr(strat, "train"):
+                try:
+                    strat.train(X_tr, None)
+                except TypeError:
+                    strat.train(X_tr)
+            sig = strat.predict_signals(X_te)
+            sig = sig.reindex(p_te.index).fillna(0.0)
+            eq = _equity_from_signals(p_te, sig, tc_bps=self.tc_bps)
+            eq_curves[f"fold_{fold}"] = eq
+            m = _metrics_from_equity(eq)
+            fold_rows.append(dict(fold=fold, start=str(p_te.index.min()), end=str(p_te.index.max()), **m))
+        df = pd.DataFrame(fold_rows)
+        summary = dict(mean_sharpe=float(df['sharpe'].mean() if not df.empty else 0.0),
+                       median_sharpe=float(df['sharpe'].median() if not df.empty else 0.0),
+                       folds=len(df))
+        return df, summary
