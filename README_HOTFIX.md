@@ -1,23 +1,19 @@
+# v2.5/v2.6 HOTFIX PACKAGE
 
-# Hotfix 2.9.13 — EventBus & Event System
+This package drops in:
+- DataNormalizer (strict), golden tests
+- Walk-Forward Adapter (leakage-free), metrics
+- Enhanced Risk Chain (portfolio constraints + anomaly/sentiment bridge + liquidity)
+- Streamlit UI (Single/WF controls, error panel, CSV export), Risk controls, Compare page
+- Optuna HPO scaffold
+- CI Smoke for DataNormalizer and Backtest Engine
 
-This hotfix delivers a production-grade EventBus with:
-- sync/async handlers, priorities, filters, once
-- sticky events (replay last), pre/post middlewares
-- bounded queue + drop policies, DLQ
-- request/response pattern
-- dynamic worker scaling
-- optional Pydantic schema validation
-- optional OpenTelemetry tracing hooks
-- metrics (published/processed/errors/latency_ms_avg)
+## Quick start
+1) Unzip at repo root
+2) Ensure deps: pydantic, optuna, scikit-learn, plotly, streamlit, pandas, pyarrow
+3) Run tests: `pytest -q tests/test_data_normalizer.py` and `pytest -q tests/smoke/`
+4) UI: `python -m ui.main` (ensure your entrypoint uses new panels)
 
-## Install
-```bash
-pip install -e .
-```
-
-## Imports
-```python
-from core.event_bus import event_bus, EventBus, BaseEvent
-from core.events import DataReadyEvent, RiskViolationDetected, BacktestCompleted
-```
+## Notes
+- Golden fixtures included under tests/fixtures/
+- Replace demo data loader in `ui/services/runners.py` with your pipeline datasource.

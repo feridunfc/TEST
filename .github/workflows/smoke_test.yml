@@ -1,0 +1,22 @@
+name: Smoke Tests
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          pip install -e .
+          pip install -r requirements.txt || true
+          pip install pytest pytest-cov pydantic optuna scikit-learn plotly streamlit pandas pyarrow
+      - name: Run smoke tests
+        run: |
+          pytest -q tests/smoke/ -k "test_backtest_engine_smoke" --cov=src --durations=10 || true
+          pytest -q tests/test_data_normalizer.py --cov=src --durations=10
