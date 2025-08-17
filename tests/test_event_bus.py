@@ -1,24 +1,31 @@
 
-import os, sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from infra.event_bus import EventBus
-from schemas.events import Event
+import asyncio
+import pytest
+from core.event_bus import EventBus, BaseEvent, DropPolicy
 
-def run():
-    bus = EventBus()
-    received = []
+class TestEvt(BaseEvent):
+    pass
 
-    def on_md(ev):
-        received.append(ev)
+@pytest.mark.asyncio
+async def test_priority_and_once_and_sticky():
+    bus = EventBus(sticky_events=True)
+    got = []
+    def low(e): got.append("low")
+    def high(e): got.append("high")
+    bus.subscribe(TestEvt, low, priority=1)
+    bus.subscribe(TestEvt, high, priority=10, once=True)
+    bus.publish(TestEvt(source="t"))
+    await asyncio.sleep(0.05)
+    assert got == ["high", "low"]
+    def late(e): got.append("late")
+    bus.subscribe(TestEvt, late, priority=5, replay_sticky=True)
+    await asyncio.sleep(0.05)
+    assert got[-1] == "late"
 
-    bus.subscribe("MARKET_DATA", on_md)
-
-    ev = Event.create("MARKET_DATA", "binance:btcusdt", {"bar": {"o":1,"h":2,"l":0.5,"c":1.3,"v":100}})
-    bus.publish("MARKET_DATA", ev.asdict())
-
-    assert len(received) == 1
-    assert received[0]["payload"]["bar"]["c"] == 1.3
-    print("event_bus_ok")
-
-if __name__ == "__main__":
-    run()
+@pytest.mark.asyncio
+async def test_drop_policy():
+    bus = EventBus(max_queue=1, drop_policy=DropPolicy.DROP_NEW)
+    bus.publish(TestEvt(source="t1"))
+    bus.publish(TestEvt(source="t2"))
+    await asyncio.sleep(0.05)
+    assert bus.metrics["dropped"] >= 1

@@ -1,25 +1,18 @@
-import numpy as np, pandas as pd
-from typing import Dict, List
+from __future__ import annotations
+from typing import Dict, Type, Any, Callable
 
-_MODELS: Dict[str,type] = {}
+_MODEL_REGISTRY: Dict[str, Type] = {}
 
-def register(name:str):
-    def deco(cls): _MODELS[name]=cls; return cls
+def register_model(name: str) -> Callable[[Type], Type]:
+    def deco(cls: Type) -> Type:
+        _MODEL_REGISTRY[name] = cls
+        return cls
     return deco
 
-def list_models()->List[str]: return sorted(_MODELS.keys())
-def get_model(name:str):
-    if name not in _MODELS: raise ValueError(f'unknown model: {name}')
-    return _MODELS[name]()
+def get_model(name: str, **kwargs) -> Any:
+    if name not in _MODEL_REGISTRY:
+        raise KeyError(f"Model '{name}' not found. Available: {list(_MODEL_REGISTRY.keys())}")
+    return _MODEL_REGISTRY[name](**kwargs)
 
-class BaseModel:
-    def fit(self, X: pd.DataFrame, y: pd.Series): ...
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray: ...
-
-@register("random_forest")
-class RF(BaseModel):
-    def __init__(self):
-        from sklearn.ensemble import RandomForestClassifier
-        self.clf = RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1, class_weight='balanced_subsample')
-    def fit(self, X,y): self.clf.fit(X,y)
-    def predict_proba(self, X): return self.clf.predict_proba(X)[:,1]
+def list_models() -> list:
+    return sorted(list(_MODEL_REGISTRY.keys()))

@@ -1,12 +1,17 @@
 
-from dataclasses import dataclass
-from .base import BaseEvent
-from .strategy_events import SignalDirection
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Any, Dict
+from .base_event import BaseEvent
 
-@dataclass
-class RiskAssessmentCompleted(BaseEvent):
-    symbol: str = ""
-    direction: SignalDirection = SignalDirection.HOLD
-    quantity: float = 0.0
-    price: float = 0.0
-    rationale: str = ""
+@dataclass(frozen=True)
+class RiskViolationDetected(BaseEvent):
+    rule: str = ""
+    value: float = 0.0
+    threshold: float = 0.0
+    details: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass(frozen=True)
+class CircuitBreakerTriggered(BaseEvent):
+    reason: str = ""
+    value: float = 0.0

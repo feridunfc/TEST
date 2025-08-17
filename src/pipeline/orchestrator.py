@@ -1,56 +1,53 @@
-import numpy as np, pandas as pd, yfinance as yf
-from typing import Optional, Dict
-from config.config import AppConfig, load_config
-from pipeline.backtest import simple_backtest, run_walkforward
-from core.metrics import compute_metrics
-from core.strategies.registry import get_strategy
+from __future__ import annotations
+import pandas as pd
+from typing import Dict, Any
+from data.loader import load_ohlcv, normalize_ohlcv
+from features.feature_pipeline import build_features, build_target
+from core.strategies.ai_unified import AIUnifiedStrategy
+from backtesting.adapter import run_backtest_adapter
 
-def _normalize(df: pd.DataFrame)->pd.DataFrame:
-    df = df.rename(columns={c:c.lower() for c in df.columns})
-    if 'adj close' in df.columns: df = df.rename(columns={'adj close':'adj_close'})
-    if not isinstance(df.index, pd.DatetimeIndex): df.index=pd.to_datetime(df.index)
-    return df.sort_index()
+def _cfg_get(cfg, path: str, default):
+    cur = cfg
+    for part in path.split("."):
+        cur = getattr(cur, part, None) if hasattr(cur, part) else cur.get(part) if isinstance(cur, dict) else None
+        if cur is None:
+            return default
+    return cur
 
-def _load(cfg: AppConfig)->pd.DataFrame:
-    if cfg.data.source=='yfinance':
-        df = yf.download(cfg.data.symbol, start=cfg.data.start, end=cfg.data.end, interval=cfg.data.interval, auto_adjust=cfg.data.auto_adjust, progress=False)
-    elif cfg.data.source=='csv':
-        df = pd.read_csv(cfg.data.csv_path, index_col=0, parse_dates=True)
+def run_pipeline(strategy: str, params: Dict[str, Any], cfg) -> tuple[pd.DataFrame, Dict[str, Any]]:
+    """Used by UI: loads data -> features -> signals -> backtest -> returns (df, info)
+
+    strategy: 'ai_unified' or others (future)
+    """
+    symbol = _cfg_get(cfg, "data.symbol", "BTC-USD")
+    source = _cfg_get(cfg, "data.source", "yfinance")
+    interval = _cfg_get(cfg, "data.interval", "1d")
+    start = _cfg_get(cfg, "data.start", None)
+    end = _cfg_get(cfg, "data.end", None)
+
+    df = load_ohlcv(source=source, symbol=symbol, start=str(start) if start else None, end=str(end) if end else None, interval=interval)
+    dfn = normalize_ohlcv(df)
+
+    # Features/target
+    feats = build_features(dfn)
+    y = build_target(df)
+
+    # Align & cut to recent overlap
+    common = feats.index.intersection(y.index).intersection(df.index)
+    feats, y, df = feats.loc[common], y.loc[common], df.loc[common]
+
+    # Strategy selection
+    if strategy == "ai_unified":
+        model_name = params.get("model_name", "random_forest")
+        threshold = float(params.get("threshold", 0.5))
+        strat = AIUnifiedStrategy(model_name=model_name, threshold=threshold)
+        # Vectorized simple split
+        signals = strat.fit_predict_vectorized(feats, y)
     else:
-        df = pd.read_parquet(cfg.data.parquet_path)
-    df = _normalize(df)
-    return df[['open','high','low','close','volume']]
+        raise KeyError(f"Unknown strategy: {strategy}")
 
-def _rsi(s: pd.Series, n:int=14)->pd.Series:
-    d=s.diff(); up=d.clip(lower=0); dn=(-d).clip(lower=0)
-    rs = up.rolling(n).mean()/(dn.rolling(n).mean()+1e-12)
-    return 100 - (100/(1+rs))
-
-def _features(df: pd.DataFrame)->pd.DataFrame:
-    f = pd.DataFrame(index=df.index)
-    f['ret1']=df['close'].pct_change().fillna(0.0)
-    f['sma20']=df['close'].rolling(20).mean()
-    f['sma50']=df['close'].rolling(50).mean()
-    f['rsi14']=_rsi(df['close'],14)
-    try:
-        from features.market_regime_detector import regime_flags
-        f = f.join(regime_flags(df['close']), how='left')
-    except Exception: pass
-    try:
-        from features.anomaly_detector import anomaly_score
-        f['anomaly']=anomaly_score(df['close'])
-    except Exception: pass
-    return f.fillna(method='ffill').fillna(0.0)
-
-def run_pipeline(strategy_name: str, params: Optional[Dict]=None, cfg: Optional[AppConfig]=None):
-    cfg = cfg or load_config()
-    df = _load(cfg)
-    feats = _features(df)
-    strat = get_strategy(strategy_name, params or {})
-    sig = strat.generate_signals(df, feats).fillna(0.0)
-    if cfg.bt.walkforward_splits>1:
-        bt = run_walkforward(df, feats, strat, cfg.fees, n_splits=cfg.bt.walkforward_splits, seed=cfg.bt.seed)
-    else:
-        bt = simple_backtest(df, sig, cfg.fees)
-    stats = compute_metrics(bt['equity'].pct_change().fillna(0.0))
-    return df, {'equity': bt['equity'], 'signals': sig, 'stats': stats, 'costs': bt.get('costs')}
+    info = run_backtest_adapter(df, signals,
+                                initial_cash=float(_cfg_get(cfg, "bt.initial_cash", 100_000.0)),
+                                commission_bps=int(_cfg_get(cfg, "fees.commission_bps", 5)),
+                                slippage_bps=int(_cfg_get(cfg, "fees.slippage_bps", 5)))
+    return df, info
