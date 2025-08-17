@@ -1,42 +1,44 @@
 
-# v2.9.11 Hotfix (Event-Driven, Walk-Forward, Regime+Anomaly, Risk Upgrades)
+# Backtest Engine Hotfix (v2.9.14)
 
-## Quick Start
+This package adds an industrial-grade `BacktestEngine` with:
+- 1-bar execution delay
+- Commission & slippage plug-ins
+- Multi-asset portfolio accounting
+- Detailed trade log
+- Robust performance metrics
+
+## Paths
+- `src/core/backtest_engine.py`
+- `src/pipeline/backtest_runner.py`
+- `src/tests/test_backtest_engine.py`
+
+## Quick start
+
 ```python
-import pandas as pd, numpy as np
-from src.core.bus.event_bus import event_bus
-from src.core.events.backtest_events import BacktestRequested
-from src.services.backtest_service import BacktestingService
-from src.utils.windows import WalkForwardConfig
+import pandas as pd
+from core.backtest_engine import BacktestEngine, OrderDirection, OrderType, PercentageCommissionModel, VolatilityProportionalSlippage
 
-# Wire services by instantiating BacktestingService (it subscribes itself)
-_ = BacktestingService()
+# Load your OHLCV DataFrames into a dict like {"AAPL": df, "MSFT": df}
+prices = {...}
 
-# Dummy data
-idx = pd.date_range("2018-01-01", periods=1500, freq="B")
-close = 100*(1+0.0004*np.random.randn(len(idx))).cumprod()
-df = pd.DataFrame({"open":close, "high":close*1.001, "low":close*0.999, "close":close, "volume":1e4}, index=idx)
+engine = BacktestEngine(
+    price_data=prices,
+    initial_capital=100_000.0,
+    commission_model=PercentageCommissionModel(0.0005, min_commission=1.0),
+    slippage_model=VolatilityProportionalSlippage(0.0003),
+    risk_free_rate=0.02,
+)
 
-wf = WalkForwardConfig(train_len=504, test_len=126)
-feature_cfg = {"regime": {"params": {"vol_window":20,"bull_q":0.35,"bear_q":0.8,"smooth":5}},
-               "anomaly": {"params": {"method":"iforest","contamination":0.02}} }
+# You can submit orders before or during run()
+engine.submit_order("AAPL", OrderDirection.LONG, 10, OrderType.MARKET)
 
-event_bus.publish(BacktestRequested(
-    source="example", asset_name="TEST", strategy_name="hybrid_v1", df=df,
-    wf_cfg=wf, feature_cfg=feature_cfg, backtest_params={"commission":0.0005,"slippage":0.0002}
-))
+report = engine.run(start_date=pd.Timestamp("2022-01-03"), end_date=pd.Timestamp("2022-02-15"))
+print(report["performance"])
+print(report["trades"].head())
 ```
 
-## What's New vs 2.9.10
-- AdaptiveDrawdownManager (dynamic DD threshold)
-- LiquidityRiskAnalyzer (order-book based checks, async stub)
-- OrderBookSlippageModel (LOB-driven fills)
-- ResidualAnalyzer (normality, ACF, stationarity; safe if deps missing)
-- TimeValidator for event sequences
-- AtomicTransaction scaffold for cross-venue atomic ops
-- Walk-Forward replay integrated with Feature/Strategy/Risk/Execution/Portfolio/Reporting
-- Vectorized PnL engine (next open execution, slippage, commission)
-
 ## Notes
-- Set PYTHONPATH to include `src` when running examples.
-- External deps (statsmodels, sklearn) are optional; modules degrade gracefully.
+- LIMIT orders are simulated simply: long fills at `min(limit, open)`, short at `max(limit, open)` on execution bar.
+- STOP orders can be added later; this hotfix focuses on stability of the core loop.
+- Short selling is supported by allowing negative inventory and mark-to-market of equity: `cash + Σ(qty * close)`.
