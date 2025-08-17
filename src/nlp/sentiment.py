@@ -1,98 +1,107 @@
-# src/nlp/sentiment.py
-import queue
-import threading
+\
+import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
+import pandas as pd
 
-from .preprocessor import clean_text
-from src.utils.nlp_utils import safe_import_transformers
+try:
+    import torch
+    _HAS_TORCH = True
+except Exception:
+    _HAS_TORCH = False
+
+from transformers import AutoTokenizer, pipeline
+from concurrent.futures import ThreadPoolExecutor
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class SentimentResult:
     text: str
-    score: float
+    score: float  # [-1, +1]
+    confidence: float
     label: str
     timestamp: datetime
     source: str
     asset: Optional[str] = None
+    metadata: Optional[Dict] = None
 
 class SentimentAnalyzer:
-    """
-    Tries to use a HF transformers model; falls back to a rule-of-thumb
-    VADER-like approach if transformers is not available.
-    """
-    def __init__(self, model_name: str = "finiteautomata/bertweet-base-sentiment-analysis"):
-        self.text_queue = queue.Queue()
-        self.results: List[SentimentResult] = []
-        self._stop_event = threading.Event()
-        self._use_transformers = safe_import_transformers()
-        self._pipeline = None
-        if self._use_transformers:
-            from transformers import pipeline, AutoTokenizer  # type: ignore
-            self._pipeline = pipeline(
-                "sentiment-analysis",
-                model=model_name,
-                tokenizer=AutoTokenizer.from_pretrained(model_name)
+    MODEL_MAP = {
+        "twitter": "finiteautomata/bertweet-base-sentiment-analysis",
+        "general": "distilbert-base-uncased-finetuned-sst-2-english",
+        "financial": "mrm8488/distilroberta-finetuned-financial-news-sentiment-analysis",
+    }
+
+    def __init__(self, model_type: str = "financial", max_workers: int = 4):
+        model_name = self.MODEL_MAP.get(model_type, self.MODEL_MAP["financial"])
+        device = 0 if _HAS_TORCH and getattr(torch, "cuda", None) and torch.cuda.is_available() else -1
+        self.model = pipeline(
+            "sentiment-analysis",
+            model=model_name,
+            tokenizer=AutoTokenizer.from_pretrained(model_name),
+            device=device,
+        )
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._results_cache = pd.DataFrame(columns=["timestamp", "asset", "score", "confidence", "source"])
+
+    def analyze(self, text: str, source: str = "unknown", asset: Optional[str] = None) -> Optional[SentimentResult]:
+        try:
+            out = self.model(text)[0]
+            res = SentimentResult(
+                text=text,
+                score=self._normalize_score(out["label"], float(out["score"])),
+                confidence=float(out["score"]),
+                label=str(out["label"]),
+                timestamp=datetime.utcnow(),
+                source=source,
+                asset=asset,
             )
+            self._cache_result(res)
+            return res
+        except Exception as e:
+            logger.error(f"Sentiment analysis failed: {e}")
+            return None
 
-    def _normalize_score(self, label: str, score: float) -> float:
-        if label.upper().startswith("NEG"):
-            return -float(score)
-        return float(score)
-
-    def _fallback_sentiment(self, text: str) -> SentimentResult:
-        """
-        Very simple fallback: positive if 'up/bull' words > 'down/bear' words.
-        """
-        t = clean_text(text).lower()
-        pos_words = sum(w in t for w in ["up", "bull", "pump", "positive", "good"])
-        neg_words = sum(w in t for w in ["down", "bear", "dump", "negative", "bad"])
-        raw = pos_words - neg_words
-        score = max(-1.0, min(1.0, raw / 3.0))
-        label = "POSITIVE" if score > 0 else ("NEGATIVE" if score < 0 else "NEUTRAL")
-        return SentimentResult(text=text, score=score, label=label, timestamp=datetime.utcnow(), source="fallback")
-
-    def analyze_batch(self, texts: List[str], sources: List[str], assets: List[str] = None) -> List[SentimentResult]:
+    async def analyze_batch_async(self, texts: List[str], sources: List[str], assets: Optional[List[str]] = None) -> List[SentimentResult]:
         if assets is None:
             assets = [None] * len(texts)
-        out: List[SentimentResult] = []
-        for text, source, asset in zip(texts, sources, assets):
-            try:
-                if self._use_transformers and self._pipeline is not None:
-                    res = self._pipeline(text)[0]
-                    out.append(
-                        SentimentResult(
-                            text=text,
-                            score=self._normalize_score(res["label"], res["score"]),
-                            label=res["label"],
-                            timestamp=datetime.utcnow(),
-                            source=source,
-                            asset=asset,
-                        )
-                    )
-                else:
-                    out.append(self._fallback_sentiment(text))
-            except Exception:
-                out.append(self._fallback_sentiment(text))
-        self.results.extend(out)
-        return out
+        futures = [self.executor.submit(self.analyze, t, s, a) for t, s, a in zip(texts, sources, assets)]
+        results = [f.result() for f in futures]
+        return [r for r in results if r is not None]
 
-    def start_realtime_analysis(self, callback):
-        def worker():
-            while not self._stop_event.is_set():
-                try:
-                    item = self.text_queue.get(timeout=1)
-                    res = self.analyze_batch([item["text"]], [item.get("source", "realtime")], [item.get("asset")])[0]
-                    callback(res)
-                    self.text_queue.task_done()
-                except queue.Empty:
-                    continue
-        th = threading.Thread(target=worker, daemon=True)
-        th.start()
-        return th
+    def get_market_sentiment(self, window: str = "1h", min_confidence: float = 0.7) -> Dict[str, float]:
+        if self._results_cache.empty:
+            return {}
+        df = self._results_cache[self._results_cache["confidence"] >= min_confidence].copy()
+        if df.empty:
+            return {}
+        df = df.set_index("timestamp")
+        df["weighted_score"] = df["score"] * df["confidence"]
+        if "asset" in df.columns:
+            grouped = df.groupby("asset")["weighted_score"].resample(window).mean()
+            return grouped.to_dict()
+        return {}
 
-    def stop_realtime_analysis(self):
-        self._stop_event.set()
+    def _normalize_score(self, label: str, score: float) -> float:
+        lab = (label or "").lower()
+        if "neg" in lab:
+            return -score
+        if "pos" in lab:
+            return score
+        return 0.0
+
+    def _cache_result(self, result: SentimentResult):
+        new_row = {
+            "timestamp": result.timestamp,
+            "asset": result.asset,
+            "score": result.score,
+            "confidence": result.confidence,
+            "source": result.source,
+        }
+        self._results_cache = pd.concat([self._results_cache, pd.DataFrame([new_row])], ignore_index=True)
+        if len(self._results_cache) > 10000:
+            self._results_cache = self._results_cache.iloc[-5000:]
