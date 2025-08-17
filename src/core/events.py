@@ -1,3 +1,4 @@
+# src/core/events.py
 from pydantic import BaseModel
 import pandas as pd
 from typing import Literal

@@ -1,34 +1,35 @@
-import streamlit as st, pandas as pd
-import plotly.express as px
-
-# Simple registry shim; replace with your internal registry
-class StrategyRegistry:
-    _REG = {"AIStrategy": "src.strategies.ai_strategy.AIStrategy"}
-    @classmethod
-    def list_available(cls):
-        return list(cls._REG.keys())
-    @classmethod
-    def get(cls, name: str):
-        # naive dynamic import
-        mod, clsname = cls._REG[name].rsplit(".", 1)
-        import importlib
-        return getattr(importlib.import_module(mod), clsname)
-
-from ..services.runners import run_walk_forward
+import streamlit as st
+import pandas as pd
+from ..services.wf_hpo_runner import run_wf_batch, run_hpo
+from ...src.strategies.registry import STRATEGY_REGISTRY
 
 def render():
-    st.title("Strategy Comparison")
-    options = StrategyRegistry.list_available()
-    selected = st.multiselect("Select Strategies", options=options, key="ns_compare_strategies")
-    if len(selected) >= 2:
-        rows = []
-        for name in selected:
-            strat_cls = StrategyRegistry.get(name)
-            strat = strat_cls()
-            wf = run_walk_forward(strategy=strat)
-            agg = wf.aggregate()
-            rows.append({"strategy": name, **agg})
-        df = pd.DataFrame(rows).set_index("strategy")
-        st.dataframe(df.style.highlight_max(axis=0))
-        fig = px.bar(df, barmode="group", title="Strategy Comparison")
-        st.plotly_chart(fig, use_container_width=True)
+    st.title("Strategy Compare — WF & HPO")
+
+    all_strats = list(STRATEGY_REGISTRY.keys())
+    selected = st.multiselect("Select strategies to compare", options=all_strats, default=all_strats[:5])
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        wf_splits = st.number_input("WF splits", min_value=2, max_value=10, value=5, step=1)
+    with c2:
+        wf_test = st.number_input("Test size (days)", min_value=21, max_value=252, value=63, step=1)
+    with c3:
+        do_hpo = st.checkbox("Run HPO for top-1 after WF", value=False)
+
+    if st.button("Run Compare"):
+        with st.spinner("Running walk-forward on selected strategies..."):
+            table = run_wf_batch(selected, wf_splits=wf_splits, wf_test=wf_test)
+        st.subheader("WF Summary")
+        st.dataframe(table.style.highlight_max(axis=0))
+
+        csv = table.to_csv().encode("utf-8")
+        st.download_button("Download CSV", data=csv, file_name="wf_compare.csv", mime="text/csv")
+
+        if do_hpo:
+            top = table.sort_values("sharpe", ascending=False).head(1).index[0]
+            st.info(f"Running HPO for best strategy: {top}")
+            res = run_hpo(top, n_trials=25)
+            st.json(res)
+
+if __name__ == "__main__":
+    render()

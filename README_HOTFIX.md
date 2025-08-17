@@ -1,19 +1,22 @@
-# v2.5/v2.6 HOTFIX PACKAGE
+# Revize Edilmiş v2.5/v2.6 Uygulama Hotfix (Tek Paket)
 
-This package drops in:
-- DataNormalizer (strict), golden tests
-- Walk-Forward Adapter (leakage-free), metrics
-- Enhanced Risk Chain (portfolio constraints + anomaly/sentiment bridge + liquidity)
-- Streamlit UI (Single/WF controls, error panel, CSV export), Risk controls, Compare page
-- Optuna HPO scaffold
-- CI Smoke for DataNormalizer and Backtest Engine
+Bu paket DataPipeline (strict), Walk-Forward Motoru, Risk Zinciri, HPO ve UI entegrasyonlarını **tek hotfix** olarak ekler.
 
-## Quick start
-1) Unzip at repo root
-2) Ensure deps: pydantic, optuna, scikit-learn, plotly, streamlit, pandas, pyarrow
-3) Run tests: `pytest -q tests/test_data_normalizer.py` and `pytest -q tests/smoke/`
-4) UI: `python -m ui.main` (ensure your entrypoint uses new panels)
+## Kurulum
+1) ZIP'i repo köküne açın (src/, ui/, config/, tests/, .github/).
+2) Gerekli paketler: pandas, numpy, scikit-learn, streamlit, pydantic, optuna, pytest (ve opsiyonel pyarrow).
 
-## Notes
-- Golden fixtures included under tests/fixtures/
-- Replace demo data loader in `ui/services/runners.py` with your pipeline datasource.
+## Test
+```bash
+pytest -q tests/golden/test_normalizer.py
+pytest -q tests/smoke/test_wf_engine.py
+```
+
+## UI
+```bash
+streamlit run ui/backtest_page.py
+```
+
+## Notlar
+- Golden doğrulama hash'i `config/golden_data_hash.json` içinde. `ENV=production` iken DataPipeline işleme sonunda hash eşitliğini doğrular.
+- Risk ayarları `config/config.json` üzerinden UI ile güncellenebilir (sidebar).

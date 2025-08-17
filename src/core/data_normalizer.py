@@ -1,5 +1,5 @@
-import pandas as pd
-import numpy as np
+# src/core/data_normalizer.py
+import pandas as pd, numpy as np
 from typing import Optional
 from .config import NormalizationConfig
 from .events import DataReadyEvent
@@ -7,6 +7,7 @@ from .events import DataReadyEvent
 REQUIRED_COLS = ["open", "high", "low", "close", "volume"]
 
 class DataNormalizer:
+    """Industry-grade normalizer with strict OHLCV + index invariants."""
     def __init__(self, config: Optional[NormalizationConfig] = None, strict_mode: bool = True):
         self.config = config or NormalizationConfig()
         self.strict_mode = strict_mode
@@ -21,10 +22,11 @@ class DataNormalizer:
         else:
             df.index = df.index.tz_convert(self.config.tz)
 
-        # NaN policy
-        df = self._apply_nan_policy(df)
+        # optional NaN handling (only in non-strict mode)
+        if not self.strict_mode and df.isnull().any().any():
+            df = self._apply_nan_policy(df)
 
-        # optional clipping (winsor-like via z-score clip on OHLC)
+        # optional winsorization via z-score clip
         if self.config.clip_outliers_z:
             ohlc = ["open","high","low","close"]
             z = (df[ohlc] - df[ohlc].mean()) / df[ohlc].std(ddof=0)
@@ -40,12 +42,11 @@ class DataNormalizer:
             _ = DataReadyEvent(symbol=symbol, frame=df)
         return df
 
+    # internals
     def _validate_input_schema(self, data: pd.DataFrame) -> None:
         missing = [c for c in REQUIRED_COLS if c not in data.columns]
         if missing:
-            msg = f"Missing columns: {missing}"
-            if self.strict_mode:
-                raise ValueError(msg)
+            if self.strict_mode: raise ValueError(f"Missing columns: {missing}")
         if not isinstance(data.index, pd.DatetimeIndex):
             raise TypeError("Index must be DatetimeIndex")
         if self.config.ensure_monotonic and not data.index.is_monotonic_increasing:
@@ -53,22 +54,21 @@ class DataNormalizer:
         if self.config.ensure_unique_index and not data.index.is_unique:
             raise ValueError("Index must be unique")
         if self.strict_mode and data.isnull().any().any():
-            raise ValueError("NaN values detected in strict mode (input)")
+            raise ValueError("NaN values detected in strict mode")
 
     def _apply_nan_policy(self, df: pd.DataFrame) -> pd.DataFrame:
-        if not self.strict_mode and df.isnull().any().any():
-            policy = self.config.nan_policy
-            if policy == "drop":
-                return df.dropna()
-            if policy == "ffill":
-                return df.ffill().dropna()
-            if policy == "bfill":
-                return df.bfill().dropna()
-            if policy == "interp":
-                return df.interpolate(method="time").ffill().bfill()
-            if policy == "fill_value":
-                fv = 0.0 if self.config.fill_value is None else float(self.config.fill_value)
-                return df.fillna(fv)
+        policy = self.config.nan_policy
+        if policy == "drop":
+            return df.dropna()
+        if policy == "ffill":
+            return df.ffill().dropna()
+        if policy == "bfill":
+            return df.bfill().dropna()
+        if policy == "interp":
+            return df.interpolate(method="time").ffill().bfill()
+        if policy == "fill_value":
+            fv = 0.0 if self.config.fill_value is None else float(self.config.fill_value)
+            return df.fillna(fv)
         return df
 
     def _scale(self, df: pd.DataFrame) -> pd.DataFrame:

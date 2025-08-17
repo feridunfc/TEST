@@ -1,4 +1,5 @@
-name: Smoke Tests
+name: Revize v2.6 Hotfix Smoke
+
 on: [push, pull_request]
 
 jobs:
@@ -11,12 +12,13 @@ jobs:
         with:
           python-version: '3.10'
           cache: 'pip'
-      - name: Install dependencies
+      - name: Install deps
         run: |
-          pip install -e .
-          pip install -r requirements.txt || true
-          pip install pytest pytest-cov pydantic optuna scikit-learn plotly streamlit pandas pyarrow
-      - name: Run smoke tests
+          pip install -e . || true
+          pip install pandas numpy scikit-learn streamlit pydantic optuna pytest pyarrow
+      - name: Run Golden & Smoke
+        env:
+          PYTHONPATH: .
         run: |
-          pytest -q tests/smoke/ -k "test_backtest_engine_smoke" --cov=src --durations=10 || true
-          pytest -q tests/test_data_normalizer.py --cov=src --durations=10
+          pytest -q tests/golden/test_normalizer.py
+          pytest -q tests/smoke/test_wf_engine.py

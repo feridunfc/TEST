@@ -1,46 +1,41 @@
-
-# utils/metrics.py
 import numpy as np
 import pandas as pd
 
-def max_drawdown(equity: pd.Series) -> float:
-    if equity.empty:
-        return 0.0
-    roll_max = equity.cummax()
-    dd = (equity / roll_max) - 1.0
-    return dd.min()
+def _to_returns(equity_or_returns: pd.Series) -> pd.Series:
+    s = equity_or_returns
+    if s is None or len(s) == 0:
+        return pd.Series([], dtype=float)
+    if (s <= 0).any() or s.max() < 5:
+        # probably returns already
+        return s.fillna(0.0)
+    # equity -> returns
+    r = s.pct_change().fillna(0.0)
+    return r
 
-def annualized_return(equity: pd.Series, periods_per_year: int = 252) -> float:
-    if equity.empty:
-        return 0.0
-    total_return = equity.iloc[-1] / equity.iloc[0] - 1.0
-    years = len(equity) / periods_per_year
-    if years <= 0:
-        return 0.0
-    return (1 + total_return) ** (1 / years) - 1
+def sharpe(equity_or_returns: pd.Series, rf: float = 0.0, annualization: int = 252) -> float:
+    r = _to_returns(equity_or_returns)
+    if len(r) < 2: return 0.0
+    ex = r - rf/annualization
+    sd = ex.std(ddof=0)
+    if sd <= 1e-12: return 0.0
+    return float((ex.mean() / sd) * np.sqrt(annualization))
 
-def sharpe_ratio(returns: pd.Series, periods_per_year: int = 252) -> float:
-    if returns.empty:
+def max_drawdown(equity_curve: pd.Series) -> float:
+    if equity_curve is None or len(equity_curve) == 0:
         return 0.0
-    mu = returns.mean() * periods_per_year
-    sigma = returns.std(ddof=0) * np.sqrt(periods_per_year)
-    return mu / sigma if sigma > 0 else 0.0
+    cummax = equity_curve.cummax()
+    dd = (equity_curve / cummax) - 1.0
+    return float(dd.min())
 
-def sortino_ratio(returns: pd.Series, periods_per_year: int = 252) -> float:
-    if returns.empty:
+def win_rate(returns: pd.Series) -> float:
+    r = _to_returns(returns)
+    if len(r) == 0: return 0.0
+    wins = (r > 0).sum()
+    return float(wins) / len(r)
+
+def turnover(positions_df: pd.DataFrame) -> float:
+    if positions_df is None or positions_df.empty:
         return 0.0
-    downside = returns[returns < 0]
-    denom = downside.std(ddof=0) * np.sqrt(periods_per_year)
-    mu = returns.mean() * periods_per_year
-    return mu / denom if denom > 0 else 0.0
-
-def metrics_from_equity(equity: pd.Series, periods_per_year: int = 252):
-    if equity.empty:
-        return {"CAGR": 0.0, "Sharpe": 0.0, "Sortino": 0.0, "MaxDD": 0.0}
-    rets = equity.pct_change().dropna()
-    return {
-        "CAGR": annualized_return(equity, periods_per_year),
-        "Sharpe": sharpe_ratio(rets, periods_per_year),
-        "Sortino": sortino_ratio(rets, periods_per_year),
-        "MaxDD": float(max_drawdown(equity)),
-    }
+    # daily turnover ~ sum abs(day-to-day weight change)
+    dw = positions_df.diff().abs().sum(axis=1).fillna(0.0)
+    return float(dw.mean())

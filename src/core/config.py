@@ -1,3 +1,4 @@
+# src/core/config.py
 from dataclasses import dataclass
 from typing import Literal, Optional
 
